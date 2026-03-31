@@ -1,8 +1,8 @@
 import cv2
 import numpy as np
 from typing import Optional
-from models.track_point import TrackPoint
-from config import CFG
+from src.models.track_point import TrackPoint
+from src.config import CFG
 
 class BallDetector:
     def __init__(self, frame_height, frame_width, quality):

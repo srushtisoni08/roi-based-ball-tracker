@@ -1,7 +1,7 @@
 import numpy as np
-from models.track_point import TrackPoint
-from analysis.trajectory_utils import _smooth
-from config import CFG
+from src.models.track_point import TrackPoint
+from src.analysis.trajectory_utils import _smooth
+from src.config import CFG
 
 def analyse_front(track: list[TrackPoint], fps: float, frame_height: int) -> tuple:
     """

@@ -1,5 +1,6 @@
 import cv2
 import json
+import os
 from collections import deque
 from src.config import CFG
 from src.models.track_point import TrackPoint
@@ -172,7 +173,9 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         ],
     }
  
-    json_out = video_path.rsplit(".", 1)[0] + "_report.json"
+    os.makedirs("data/reports", exist_ok=True)
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    json_out = os.path.join("data", "reports", f"{video_name}_report.json")
     with open(json_out, "w") as f:
         json.dump(report, f, indent=2)
     print(f"\n[INFO] Report saved : {json_out}")

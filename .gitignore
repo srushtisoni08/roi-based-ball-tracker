@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
-data/output/
+data/output_videos/
 data/reports/
 venv/
+data/input_videos

@@ -1,5 +1,5 @@
-from models.track_point import TrackPoint
-from config import CFG
+from src.models.track_point import TrackPoint
+from src.config import CFG
 
 def segment_deliveries(all_detections: list[TrackPoint]) -> list[list[TrackPoint]]:
     if not all_detections:

@@ -1,6 +1,6 @@
 import cv2
-from config import CFG, LENGTH_COLORS
-from models.delivery_result import DeliveryResult
+from src.config import CFG, LENGTH_COLORS
+from src.models.delivery_result import DeliveryResult
 
 def draw_hud(frame, results_so_far, current_ball_no, total_balls=6):
     """Draw scoreboard HUD in top-left corner."""
