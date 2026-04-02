@@ -1,183 +1,150 @@
-import math
 import numpy as np
 from src.models.track_point import TrackPoint
-from src.config import CFG
 
 
-def _distance(p1: TrackPoint, p2: TrackPoint) -> float:
-    return math.hypot(p1.x - p2.x, p1.y - p2.y)
+# ── Tunable constants ────────────────────────────────────────────────────────
+
+# Maximum frame gap inside one delivery (frames)
+MAX_INTRA_GAP = 15
+
+# Minimum tracked points to consider a sequence a real delivery
+MIN_POINTS = 5
+
+# Minimum total displacement (px) across the sequence
+MIN_DISPLACEMENT = 20          # was implicitly ~30 via x_std check
+
+# Minimum x standard deviation to accept as "real lateral movement"
+# (side view: ball moves across frame)
+MIN_X_STD_SIDE = 8             # was 30 — way too strict for phone videos
+
+# Minimum y range to accept as "real forward movement"  
+# (front view: ball grows in size / moves down)
+MIN_Y_RANGE_FRONT = 30
+
+# Maximum frame gap between deliveries — larger gap = new delivery
+INTER_DELIVERY_GAP = 45
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  NEW: Movement validator
-#  Kills the root cause of false deliveries: static blobs (batsman pad/foot,
-#  stumps, net posts) that persist for many frames but never actually move.
-# ──────────────────────────────────────────────────────────────────────────────
-def _is_valid_delivery_track(segment: list[TrackPoint]) -> bool:
-    """
-    Returns True only if the segment looks like a real ball trajectory:
-
-    1. Total displacement >= min_total_displacement_px
-       A cricket ball travels 150–300 px across the frame minimum.
-       A static pad/foot blob moves 0–15 px — always fails this.
-
-    2. X-spread (std-dev) >= min_x_spread_px
-       A real delivery moves consistently in one direction across X.
-       Net mesh oscillations cluster at the same X position.
-
-    3. Directional consistency: the track has a dominant direction.
-       At least 60 % of consecutive pairs must share the same X-sign.
-       Random blobs flicker left/right equally.
-    """
-    if len(segment) < 2:
-        return False
-
-    xs = [p.x for p in segment]
-    ys = [p.y for p in segment]
-
-    # ── Test 1: total displacement ─────────────────────────────────────
-    total_disp = math.hypot(xs[-1] - xs[0], ys[-1] - ys[0])
-    min_disp   = CFG.get("min_total_displacement_px", 80)
-    if total_disp < min_disp:
-        print(f"[SKIP] Static blob — displacement={total_disp:.1f}px < {min_disp}px")
-        return False
-
-    # ── Test 2: x-spread ───────────────────────────────────────────────
-    x_spread  = float(np.std(xs))
-    min_spread = CFG.get("min_x_spread_px", 30)
-    if x_spread < min_spread:
-        print(f"[SKIP] No lateral movement — x_std={x_spread:.1f}px < {min_spread}px")
-        return False
-
-    # ── Test 3: directional consistency ───────────────────────────────
-    dx_signs = [np.sign(xs[i] - xs[i - 1]) for i in range(1, len(xs))
-                if xs[i] != xs[i - 1]]
-    if dx_signs:
-        dominant = max(set(dx_signs), key=dx_signs.count)
-        consistency = dx_signs.count(dominant) / len(dx_signs)
-        if consistency < 0.55:          # less than 55 % consistent → noise
-            print(f"[SKIP] Inconsistent direction — consistency={consistency:.2f}")
-            return False
-
-    return True
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-def _filter_noisy_detections(detections: list[TrackPoint]) -> list[TrackPoint]:
+def segment_deliveries(detections: list,
+                       view: str = "side") -> list[list]:
     if not detections:
         return []
 
-    max_jump       = CFG["max_interframe_jump_px"]
-    max_interp_gap = CFG.get("max_interp_gap_frames", 4)
+    detections = sorted(detections, key=lambda d: d.frame)
 
-    filtered = [detections[0]]
+    # ── Step 1: split by large frame gaps ────────────────────────
+    raw_segments: list[list] = []
+    current: list = [detections[0]]
 
-    for i in range(1, len(detections)):
-        curr      = detections[i]
-        prev      = filtered[-1]
-        frame_gap = curr.frame - prev.frame
-
-        # Within a short gap allow proportional jump (ball briefly occluded)
-        allowed_jump = max_jump * frame_gap if frame_gap <= max_interp_gap else max_jump
-
-        if _distance(curr, prev) <= allowed_jump:
-            filtered.append(curr)
-        # else: silently discard positional teleport
-
-    return filtered
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-def _split_by_direction_reversal(segment: list[TrackPoint]) -> list[list[TrackPoint]]:
-    """
-    Splits a segment when the ball snaps back toward the bowler end,
-    indicating a new delivery hidden inside one continuous track.
-    """
-    if len(segment) < 2:
-        return [segment]
-
-    reversal_px = CFG.get("direction_reversal_px", 250)
-    min_travel  = CFG.get("min_travel_before_reversal_px", 150)
-
-    splits   = [0]
-    xs       = [p.x for p in segment]
-    anchor_x = xs[0]
-
-    for i in range(1, len(xs)):
-        travel = xs[i] - anchor_x
-
-        if abs(travel) >= min_travel:
-            dx = xs[i] - xs[i - 1]
-            if (travel > 0 and dx < -reversal_px) or (travel < 0 and dx > reversal_px):
-                splits.append(i)
-                anchor_x = xs[i]
-
-    if len(splits) == 1:
-        return [segment]
-
-    parts = []
-    for k in range(len(splits)):
-        start = splits[k]
-        end   = splits[k + 1] if k + 1 < len(splits) else len(segment)
-        parts.append(segment[start:end])
-    return parts
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-def segment_deliveries(all_detections: list[TrackPoint]) -> list[list[TrackPoint]]:
-    if not all_detections:
-        return []
-
-    # ── Step 1: Remove noisy single-frame jump detections ─────────────
-    clean = _filter_noisy_detections(all_detections)
-    print(f"[INFO] After noise filter: {len(clean)}/{len(all_detections)} detections kept")
-
-    if not clean:
-        return []
-
-    # ── Step 2: Split into raw segments by frame gap ───────────────────
-    raw_segments: list[list[TrackPoint]] = []
-    current = [clean[0]]
-
-    for i in range(1, len(clean)):
-        gap = clean[i].frame - clean[i - 1].frame
-        if gap > CFG["delivery_gap_frames"]:
-            raw_segments.append(current)
-            current = []
-        current.append(clean[i])
-
-    raw_segments.append(current)
-
-    # ── Step 3: Direction-reversal split (catches merged deliveries) ───
-    split_segments: list[list[TrackPoint]] = []
-    for seg in raw_segments:
-        split_segments.extend(_split_by_direction_reversal(seg))
-
-    # ── Step 4: Minimum frame-count filter ────────────────────────────
-    length_filtered: list[list[TrackPoint]] = []
-    for seg in split_segments:
-        if len(seg) >= CFG["min_track_frames"]:
-            length_filtered.append(seg)
+    for det in detections[1:]:
+        gap = det.frame - current[-1].frame
+        if gap > MAX_INTRA_GAP:
+            if len(current) >= MIN_POINTS:
+                raw_segments.append(current)
+            current = [det]
         else:
-            print(f"[SKIP] Too short — {len(seg)} frames "
-                  f"(min={CFG['min_track_frames']})")
+            current.append(det)
 
-    # ── Step 5: Movement / displacement filter (THE KEY FIX) ──────────
-    # Eliminates static blobs that survived steps 1-4.
-    deliveries: list[list[TrackPoint]] = []
-    for seg in length_filtered:
-        if _is_valid_delivery_track(seg):
-            deliveries.append(seg)
+    if len(current) >= MIN_POINTS:
+        raw_segments.append(current)
 
-    print(f"[INFO] Segmented into {len(deliveries)} valid deliveries "
+    # ── Step 2: direction-split within each raw segment ───────────
+    # If the ball clearly reverses direction mid-segment, split there.
+    direction_split: list[list] = []
+    for seg in raw_segments:
+        direction_split.extend(_split_on_direction_reversal(seg))
+
+    # ── Step 3: filter noise segments ─────────────────────────────
+    valid: list[list] = []
+    for seg in direction_split:
+        if len(seg) < MIN_POINTS:
+            continue
+        if not _has_real_movement(seg, view):
+            continue
+        valid.append(seg)
+
+    print(f"[INFO] Segmented into {len(valid)} valid deliveries "
           f"(from {len(raw_segments)} raw segments, "
-          f"{len(split_segments)} after direction-split, "
-          f"{len(length_filtered)} after length filter)")
-    return deliveries
+          f"{len(direction_split)} after direction-split, "
+          f"{len(valid)} after length filter)")
+
+    return valid
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-def _smooth(values, window=3):
-    half = window // 2
-    return [np.mean(values[max(0, i - half): min(len(values), i + half + 1)])
-            for i in range(len(values))]
+# ── Private helpers ──────────────────────────────────────────────────────────
+
+def _split_on_direction_reversal(seg: list) -> list[list]:
+    """
+    Split a segment if the ball clearly reverses its primary direction
+    (e.g. two deliveries merged because camera didn't move between them).
+    Only splits when there is a very strong reversal (>60 px) to avoid
+    splitting a single delivery that has noisy detections.
+    """
+    if len(seg) < 10:
+        return [seg]
+
+    xs = [p.x for p in seg]
+    # Smooth with a small window
+    window = min(5, len(xs) // 3)
+    if window < 2:
+        return [seg]
+
+    smoothed = np.convolve(xs, np.ones(window) / window, mode='valid')
+    directions = np.sign(np.diff(smoothed))
+
+    splits = [0]
+    run_len = 1
+    for i in range(1, len(directions)):
+        if directions[i] != 0 and directions[i] != directions[i - 1]:
+            run_len = 1
+        else:
+            run_len += 1
+        # Only split after a sustained reversal of at least 4 frames
+        if run_len == 1 and i > 4:
+            # check magnitude of reversal
+            pre_x  = np.mean(xs[max(0, i - 4):i])
+            post_x = np.mean(xs[i:min(len(xs), i + 4)])
+            if abs(post_x - pre_x) > 60:
+                splits.append(i + window // 2)
+
+    splits.append(len(seg))
+    result = []
+    for a, b in zip(splits, splits[1:]):
+        chunk = seg[a:b]
+        if len(chunk) >= MIN_POINTS:
+            result.append(chunk)
+
+    return result if result else [seg]
+
+
+def _has_real_movement(seg: list, view: str) -> bool:
+    """
+    Return True if the segment shows real ball movement (not static noise).
+
+    For side view: require minimum x standard deviation OR total displacement.
+    For front view: require minimum y range.
+    """
+    xs = np.array([p.x for p in seg])
+    ys = np.array([p.y for p in seg])
+
+    x_std   = float(np.std(xs))
+    y_range = float(np.max(ys) - np.min(ys))
+    x_range = float(np.max(xs) - np.min(xs))
+
+    # Total Euclidean displacement (start → end)
+    disp = float(((xs[-1] - xs[0])**2 + (ys[-1] - ys[0])**2) ** 0.5)
+
+    if view == "front":
+        ok = y_range >= MIN_Y_RANGE_FRONT
+        if not ok:
+            print(f"[SKIP] Front-view segment rejected: y_range={y_range:.1f}px < {MIN_Y_RANGE_FRONT}px")
+        return ok
+    else:
+        # Side view: accept if there's meaningful movement in ANY direction
+        ok = (x_std >= MIN_X_STD_SIDE or
+              x_range >= MIN_DISPLACEMENT or
+              disp >= MIN_DISPLACEMENT)
+        if not ok:
+            print(f"[SKIP] Side-view segment rejected: "
+                  f"x_std={x_std:.1f}px, x_range={x_range:.1f}px, disp={disp:.1f}px")
+        return ok
