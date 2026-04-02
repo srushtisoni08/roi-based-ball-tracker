@@ -55,10 +55,13 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
             break
 
         det = detector.detect(frame)
+        det = detector.detect(frame)
         if det:
             det.frame = frame_no
             all_detections.append(det)
             trail.append((int(det.x), int(det.y)))
+            if frame_no % 30 == 0:  # print once per second
+                print(f"[DEBUG] frame={frame_no} x={det.x} y={det.y} r={det.radius:.1f} conf={det.confidence:.2f}")
 
         # ── Draw ──────────────────────────────────────────────────
         vis = frame.copy()

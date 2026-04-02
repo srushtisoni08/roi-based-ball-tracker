@@ -8,17 +8,15 @@ from src.models.track_point import TrackPoint
 MAX_INTRA_GAP = 6
 
 # Minimum tracked points to consider a sequence a real delivery
-MIN_POINTS = 5
+MIN_POINTS = 20
 
 # Minimum total displacement (px) across the sequence
-MIN_DISPLACEMENT = 20          # was implicitly ~30 via x_std check
+MIN_DISPLACEMENT = 20
 
 # Minimum x standard deviation to accept as "real lateral movement"
-# (side view: ball moves across frame)
-MIN_X_STD_SIDE = 8             # was 30 — way too strict for phone videos
+MIN_X_STD_SIDE = 8
 
-# Minimum y range to accept as "real forward movement"  
-# (front view: ball grows in size / moves down)
+# Minimum y range to accept as "real forward movement"
 MIN_Y_RANGE_FRONT = 20
 
 # Maximum frame gap between deliveries — larger gap = new delivery
@@ -49,10 +47,15 @@ def segment_deliveries(detections: list,
         raw_segments.append(current)
 
     # ── Step 2: direction-split within each raw segment ───────────
-    # If the ball clearly reverses direction mid-segment, split there.
     direction_split: list[list] = []
     for seg in raw_segments:
-        direction_split.extend(_split_on_direction_reversal(seg))
+        direction_split.extend(_split_on_direction_reversal(seg, view=view))
+
+    # ── Step 2b: duration-split anything still too long ───────────
+    duration_split: list[list] = []
+    for seg in direction_split:
+        duration_split.extend(_split_by_duration(seg, max_frames=90))
+    direction_split = duration_split
 
     # ── Step 3: filter noise segments ─────────────────────────────
     valid: list[list] = []
@@ -65,7 +68,7 @@ def segment_deliveries(detections: list,
 
     print(f"[INFO] Segmented into {len(valid)} valid deliveries "
           f"(from {len(raw_segments)} raw segments, "
-          f"{len(direction_split)} after direction-split, "
+          f"{len(duration_split)} after duration-split, "
           f"{len(valid)} after length filter)")
 
     return valid
@@ -73,23 +76,45 @@ def segment_deliveries(detections: list,
 
 # ── Private helpers ──────────────────────────────────────────────────────────
 
-def _split_on_direction_reversal(seg: list) -> list[list]:
-    """
-    Split a segment if the ball clearly reverses its primary direction
-    (e.g. two deliveries merged because camera didn't move between them).
-    Only splits when there is a very strong reversal (>60 px) to avoid
-    splitting a single delivery that has noisy detections.
-    """
+def _split_by_duration(seg: list, max_frames: int = 90) -> list[list]:
+    """Split a segment that is too long to be a single delivery."""
+    if len(seg) <= max_frames:
+        return [seg]
+
+    result = []
+    current = [seg[0]]
+
+    for i in range(1, len(seg)):
+        frame_span = seg[i].frame - current[0].frame
+        gap = seg[i].frame - seg[i - 1].frame
+
+        # Split if we've exceeded max duration OR there's a gap in detections
+        if frame_span > max_frames or gap > 6:
+            if len(current) >= MIN_POINTS:
+                result.append(current)
+            current = [seg[i]]
+        else:
+            current.append(seg[i])
+
+    if len(current) >= MIN_POINTS:
+        result.append(current)
+
+    return result if result else [seg]
+
+
+def _split_on_direction_reversal(seg: list, view: str = "side") -> list[list]:
     if len(seg) < 10:
         return [seg]
 
-    xs = [p.x for p in seg]
-    # Smooth with a small window
-    window = min(5, len(xs) // 3)
+    # Front view: ball moves on Y axis (toward camera)
+    # Side view: ball moves on X axis (across frame)
+    vals = [p.y for p in seg] if view == "front" else [p.x for p in seg]
+
+    window = min(5, len(vals) // 3)
     if window < 2:
         return [seg]
 
-    smoothed = np.convolve(xs, np.ones(window) / window, mode='valid')
+    smoothed = np.convolve(vals, np.ones(window) / window, mode='valid')
     directions = np.sign(np.diff(smoothed))
 
     splits = [0]
@@ -99,12 +124,10 @@ def _split_on_direction_reversal(seg: list) -> list[list]:
             run_len = 1
         else:
             run_len += 1
-        # Only split after a sustained reversal of at least 4 frames
-        if run_len == 1 and i > 8:
-            # check magnitude of reversal
-            pre_x  = np.mean(xs[max(0, i - 4):i])
-            post_x = np.mean(xs[i:min(len(xs), i + 4)])
-            if abs(post_x - pre_x) > 80:
+        if run_len == 1 and i > 12:
+            pre_val  = float(np.mean(vals[max(0, i - 4):i]))
+            post_val = float(np.mean(vals[i:min(len(vals), i + 4)]))
+            if abs(post_val - pre_val) > 120:
                 splits.append(i + window // 2)
 
     splits.append(len(seg))
@@ -113,7 +136,6 @@ def _split_on_direction_reversal(seg: list) -> list[list]:
         chunk = seg[a:b]
         if len(chunk) >= MIN_POINTS:
             result.append(chunk)
-
     return result if result else [seg]
 
 
@@ -126,12 +148,9 @@ def _has_real_movement(seg: list, view: str) -> bool:
     y_range = float(np.max(ys) - np.min(ys))
     x_range = float(np.max(xs) - np.min(xs))
 
-    # Total Euclidean displacement (start → end)
     disp = float(((xs[-1] - xs[0])**2 + (ys[-1] - ys[0])**2) ** 0.5)
 
     if view == "front":
-        # Front view: ball moves toward camera — y grows, size grows
-        # Accept if ANY of these show real movement
         ok = (y_range >= MIN_Y_RANGE_FRONT or
               y_std >= 15 or
               disp >= MIN_DISPLACEMENT)
@@ -140,7 +159,6 @@ def _has_real_movement(seg: list, view: str) -> bool:
                   f"y_range={y_range:.1f}px, y_std={y_std:.1f}px, disp={disp:.1f}px")
         return ok
     else:
-        # Side view: ball moves across frame — check x movement
         ok = (x_std >= MIN_X_STD_SIDE or
               x_range >= MIN_DISPLACEMENT or
               disp >= MIN_DISPLACEMENT)
