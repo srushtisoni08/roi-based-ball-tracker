@@ -5,7 +5,7 @@ from src.models.track_point import TrackPoint
 # ── Tunable constants ────────────────────────────────────────────────────────
 
 # Maximum frame gap inside one delivery (frames)
-MAX_INTRA_GAP = 15
+MAX_INTRA_GAP = 6
 
 # Minimum tracked points to consider a sequence a real delivery
 MIN_POINTS = 5
@@ -19,7 +19,7 @@ MIN_X_STD_SIDE = 8             # was 30 — way too strict for phone videos
 
 # Minimum y range to accept as "real forward movement"  
 # (front view: ball grows in size / moves down)
-MIN_Y_RANGE_FRONT = 30
+MIN_Y_RANGE_FRONT = 20
 
 # Maximum frame gap between deliveries — larger gap = new delivery
 INTER_DELIVERY_GAP = 45
@@ -100,11 +100,11 @@ def _split_on_direction_reversal(seg: list) -> list[list]:
         else:
             run_len += 1
         # Only split after a sustained reversal of at least 4 frames
-        if run_len == 1 and i > 4:
+        if run_len == 1 and i > 8:
             # check magnitude of reversal
             pre_x  = np.mean(xs[max(0, i - 4):i])
             post_x = np.mean(xs[i:min(len(xs), i + 4)])
-            if abs(post_x - pre_x) > 60:
+            if abs(post_x - pre_x) > 80:
                 splits.append(i + window // 2)
 
     splits.append(len(seg))
@@ -118,16 +118,11 @@ def _split_on_direction_reversal(seg: list) -> list[list]:
 
 
 def _has_real_movement(seg: list, view: str) -> bool:
-    """
-    Return True if the segment shows real ball movement (not static noise).
-
-    For side view: require minimum x standard deviation OR total displacement.
-    For front view: require minimum y range.
-    """
     xs = np.array([p.x for p in seg])
     ys = np.array([p.y for p in seg])
 
     x_std   = float(np.std(xs))
+    y_std   = float(np.std(ys))
     y_range = float(np.max(ys) - np.min(ys))
     x_range = float(np.max(xs) - np.min(xs))
 
@@ -135,12 +130,17 @@ def _has_real_movement(seg: list, view: str) -> bool:
     disp = float(((xs[-1] - xs[0])**2 + (ys[-1] - ys[0])**2) ** 0.5)
 
     if view == "front":
-        ok = y_range >= MIN_Y_RANGE_FRONT
+        # Front view: ball moves toward camera — y grows, size grows
+        # Accept if ANY of these show real movement
+        ok = (y_range >= MIN_Y_RANGE_FRONT or
+              y_std >= 15 or
+              disp >= MIN_DISPLACEMENT)
         if not ok:
-            print(f"[SKIP] Front-view segment rejected: y_range={y_range:.1f}px < {MIN_Y_RANGE_FRONT}px")
+            print(f"[SKIP] Front-view segment rejected: "
+                  f"y_range={y_range:.1f}px, y_std={y_std:.1f}px, disp={disp:.1f}px")
         return ok
     else:
-        # Side view: accept if there's meaningful movement in ANY direction
+        # Side view: ball moves across frame — check x movement
         ok = (x_std >= MIN_X_STD_SIDE or
               x_range >= MIN_DISPLACEMENT or
               disp >= MIN_DISPLACEMENT)

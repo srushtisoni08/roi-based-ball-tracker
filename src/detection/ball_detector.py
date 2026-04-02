@@ -94,8 +94,8 @@ class BallDetector:
         self._tracker = BallTracker(
             process_noise=1e-2,
             measurement_noise=5e-2,
-            max_missed=8,
-            confirm_hits=3,
+            max_missed=12,
+            confirm_hits=2,
         )
 
         self._frame_idx = 0
@@ -128,6 +128,7 @@ class BallDetector:
         self._frame_idx += 1
 
         if not self._tracker.is_active:
+            self._tracker.reset()
             return None
 
         det = Detection(

@@ -26,7 +26,7 @@ CFG = {
     "min_track_frames":    8,
     # 45 frames = 1.5 s gap between deliveries at 30 fps.
     # 90 frames meant consecutive deliveries merged into one track.
-    "delivery_gap_frames": 45,
+    "delivery_gap_frames": 20,
 
     # ── Trajectory / noise filter ──────────────────────────────────────
     "max_interframe_jump_px": 120,   # ball moves fast; 80 was too strict

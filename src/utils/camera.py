@@ -70,8 +70,8 @@ def detect_view(cap: cv2.VideoCapture,
     # a tall narrow frame.  This is NEVER a genuine end-on (front) view.
     if height > width * 1.2:
         cap.set(cv2.CAP_PROP_POS_FRAMES, original_pos)
-        print(f"[INFO] View detected: side (portrait frame {width}x{height})")
-        return "side"
+        print(f"[INFO] View detected: front (portrait frame {width}x{height})")
+        return "front"
 
     # ── Rule 2: Sobel edge orientation ──────────────────────────────
     h_energies, v_energies = [], []
