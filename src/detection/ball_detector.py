@@ -1,156 +1,181 @@
 import cv2
 import numpy as np
-from typing import Optional
-from src.models.track_point import TrackPoint
-from src.config import CFG
+from dataclasses import dataclass
+
+from .motion_detector import MotionDetector
+from .color_detector import ColorDetector
+from .tracker import BallTracker, TrackState
+
+
+@dataclass
+class Detection:
+    """One frame's result from the full pipeline."""
+    x: float
+    y: float
+    radius: float
+    frame_idx: int
+    confidence: float          # 0-1, based on circularity × signal coverage
+    tracked: bool = False      # True if Kalman tracker is confirmed
+    raw_cx: float | None = None   # raw contour centre before Kalman
+    raw_cy: float | None = None
 
 
 class BallDetector:
-    def __init__(self, frame_height, frame_width, quality):
-        self.frame_height = frame_height
-        self.frame_width  = frame_width
-        self.quality      = quality
+    """
+    Detects and tracks a single cricket ball across frames.
 
-        self.kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        self.kernel3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        self.min_r   = int(CFG["ball_min_radius_frac"] * frame_height)
-        self.max_r   = int(CFG["ball_max_radius_frac"] * frame_height)
-        self.circ_thresh = (CFG["circularity_pro"] if quality == "professional"
-                            else CFG["circularity_mob"])
+    Parameters
+    ----------
+    ball_color : str
+        "red" | "white" | "pink" | "auto"
+    min_radius : int
+        Minimum accepted ball radius in pixels.
+    max_radius : int
+        Maximum accepted ball radius in pixels.
+    min_circularity : float
+        0-1 score; 1 = perfect circle.  Cricket ball ≥ 0.70 is typical.
+    use_motion : bool
+        If False, skip motion masking (useful for very slow cameras).
+    """
 
-        # ── ROI ───────────────────────────────────────────────────────
-        self.roi_x1 = int(CFG["roi_x_min_frac"] * frame_width)
-        self.roi_x2 = int(CFG["roi_x_max_frac"] * frame_width)
-        self.roi_y1 = int(CFG["roi_y_min_frac"] * frame_height)
-        self.roi_y2 = int(CFG["roi_y_max_frac"] * frame_height)
+    def __init__(self,
+                 ball_color: str = "auto",
+                 min_radius: int = 5,
+                 max_radius: int = 40,
+                 min_circularity: float = 0.70,
+                 use_motion: bool = True):
 
-        self.prev_gray = None
+        self.min_radius = min_radius
+        self.max_radius = max_radius
+        self.min_circularity = min_circularity
+        self.use_motion = use_motion
 
-        # ── Idle-frame counter for auto bg-subtractor reset ───────────
-        self._frames_since_detection = 0
-        self._reset_threshold        = CFG["delivery_gap_frames"]
-
-        # ── NEW: Short-window position history for movement scoring ───
-        # We keep the last N detected positions so that candidates that
-        # appear at the same spot frame after frame score lower than
-        # candidates that have been moving consistently.
-        self._recent_positions: list[tuple[int, int]] = []   # (x, y)
-        self._history_len = 6   # rolling window
-
-        self._build_bg_sub()
-
-    # ── helpers ───────────────────────────────────────────────────────
-    def _build_bg_sub(self):
-        self.bg_sub = cv2.createBackgroundSubtractorMOG2(
-            history=CFG["bg_history"],
-            varThreshold=CFG["bg_var_threshold"],
-            detectShadows=False,
+        self._motion = MotionDetector(blur_ksize=5, min_area=min_radius ** 2)
+        self._color = ColorDetector(ball_color=ball_color, dilate=4)
+        self._tracker = BallTracker(
+            process_noise=1e-2,
+            measurement_noise=5e-2,
+            max_missed=8,
+            confirm_hits=3,
         )
 
-    def reset_for_next_delivery(self):
-        """Explicit reset between deliveries (optional)."""
-        self._build_bg_sub()
-        self.prev_gray             = None
-        self._frames_since_detection = 0
-        self._recent_positions     = []
+        self._frame_idx = 0
 
-    # ── NEW: movement-consistency score ──────────────────────────────
-    def _movement_score(self, cx: int, cy: int) -> float:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def process_frame(self, frame: np.ndarray) -> Detection | None:
         """
-        Returns a score in [0, 1] representing how consistently this
-        candidate is moving relative to the recent position history.
+        Run the full pipeline on one frame.
 
-        Logic:
-        - If there's no history yet → return 0.5 (neutral, let it pass).
-        - Compute the distance from the candidate to the MEAN of recent
-          positions. A static blob will always be close to its own mean,
-          so distance ≈ 0 → score near 0.
-        - A moving ball will drift away from its rolling mean → score > 0.
-        - Normalise against max_interframe_jump_px so the scale is [0,1].
+        Returns a Detection (with Kalman-smoothed position) or None when
+        the tracker has been inactive too long.
         """
-        if len(self._recent_positions) < 2:
-            return 0.5
+        # ── Signal A: motion ──────────────────────────────────────
+        motion_mask = self._motion.update(frame) if self.use_motion else None
 
-        mean_x = np.mean([p[0] for p in self._recent_positions])
-        mean_y = np.mean([p[1] for p in self._recent_positions])
+        # ── Signal B: colour ──────────────────────────────────────
+        color_mask = self._color.detect(frame)
 
-        dist_from_mean = np.hypot(cx - mean_x, cy - mean_y)
-        norm = CFG["max_interframe_jump_px"]          # normalisation factor
-        return min(dist_from_mean / norm, 1.0)
+        # ── Combine A ∩ B ─────────────────────────────────────────
+        if motion_mask is not None:
+            combined = cv2.bitwise_and(color_mask, motion_mask)
+        else:
+            combined = color_mask
 
-    # ── main detect method ────────────────────────────────────────────
-    def detect(self, frame) -> Optional[TrackPoint]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # ── Signal C: contour filter ──────────────────────────────
+        candidate = self._best_candidate(combined, frame)
 
-        # ── Auto-reset bg subtractor after long idle gap ──────────────
-        if self._frames_since_detection >= self._reset_threshold:
-            self._build_bg_sub()
-            self.prev_gray         = None
-            self._frames_since_detection = 0
-            self._recent_positions = []
+        # ── Kalman update ─────────────────────────────────────────
+        state: TrackState = self._tracker.update(candidate)
 
-        # ── Method 1: Background subtraction ─────────────────────────
-        fg = self.bg_sub.apply(frame)
-        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,  self.kernel)
-        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, self.kernel)
+        self._frame_idx += 1
 
-        # ── Method 2: Frame difference (catches fast-moving ball) ─────
-        fd_mask = np.zeros_like(fg)
-        if self.prev_gray is not None:
-            diff = cv2.absdiff(gray, self.prev_gray)
-            _, fd_mask = cv2.threshold(diff, 18, 255, cv2.THRESH_BINARY)
-            fd_mask = cv2.morphologyEx(fd_mask, cv2.MORPH_OPEN, self.kernel3)
+        if not self._tracker.is_active:
+            return None
 
-        self.prev_gray = gray
+        det = Detection(
+            x=state.x,
+            y=state.y,
+            radius=state.radius,
+            frame_idx=self._frame_idx - 1,
+            confidence=self._confidence(state, candidate),
+            tracked=state.confirmed,
+            raw_cx=candidate[0] if candidate else None,
+            raw_cy=candidate[1] if candidate else None,
+        )
+        return det
 
-        # ── Combine + apply ROI ───────────────────────────────────────
-        combined = cv2.bitwise_or(fg, fd_mask)
-        roi_mask = np.zeros_like(combined)
-        roi_mask[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2] = 255
-        combined = cv2.bitwise_and(combined, roi_mask)
+    def reset(self) -> None:
+        """Reset between deliveries or videos."""
+        self._motion.reset()
+        self._tracker.reset()
+        self._frame_idx = 0
 
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL,
+    def get_trajectory(self) -> list[tuple]:
+        """Full (x, y, r) history from the Kalman tracker."""
+        return self._tracker.get_trajectory()
+
+    @property
+    def resolved_color(self) -> str | None:
+        return self._color.resolved_color
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _best_candidate(self,
+                        mask: np.ndarray,
+                        frame: np.ndarray) -> tuple | None:
+        """
+        Find the single best circular blob in the combined mask.
+
+        Scores each contour by:
+            score = circularity × (area / expected_area)
+        and returns the (cx, cy, radius) of the highest-scorer.
+        """
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
-
-        # ── Score every candidate contour ─────────────────────────────
-        best, best_score = None, -1
+        best_score = -1.0
+        best = None
 
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if not (CFG["ball_min_area_px"] <= area <= CFG["ball_max_area_px"]):
+            if area < np.pi * self.min_radius ** 2:
+                continue
+            if area > np.pi * self.max_radius ** 2:
                 continue
 
-            (cx, cy), radius = cv2.minEnclosingCircle(cnt)
-            if not (self.min_r <= radius <= self.max_r):
+            perimeter = cv2.arcLength(cnt, True)
+            if perimeter < 1:
                 continue
 
-            perim = cv2.arcLength(cnt, True)
-            if perim == 0:
+            circularity = 4 * np.pi * area / (perimeter ** 2)
+            if circularity < self.min_circularity:
                 continue
 
-            circularity = (4 * np.pi * area) / (perim ** 2)
-            if circularity < self.circ_thresh:
+            (cx, cy), enc_r = cv2.minEnclosingCircle(cnt)
+            radius = enc_r
+
+            if radius < self.min_radius or radius > self.max_radius:
                 continue
 
-            # ── NEW: incorporate movement score into final ranking ────
-            # score = circularity × area × movement_bonus
-            # A static blob with circularity=0.9, area=400 but movement=0.0
-            # scores 0, while a moving ball with circ=0.6, area=300,
-            # movement=0.8 scores 144 and wins.
-            movement = self._movement_score(int(cx), int(cy))
-            score    = circularity * area * (1.0 + movement)  # movement is a bonus
+            # Expected area for this radius
+            expected = np.pi * radius ** 2
+            area_score = min(area / expected, 1.0)
 
+            score = circularity * area_score
             if score > best_score:
                 best_score = score
-                best = TrackPoint(frame=0, x=int(cx), y=int(cy), radius=radius)
-
-        # ── Update position history and idle counter ──────────────────
-        if best is None:
-            self._frames_since_detection += 1
-        else:
-            self._frames_since_detection = 0
-            self._recent_positions.append((best.x, best.y))
-            if len(self._recent_positions) > self._history_len:
-                self._recent_positions.pop(0)
+                best = (float(cx), float(cy), float(radius))
 
         return best
+
+    @staticmethod
+    def _confidence(state: TrackState, raw: tuple | None) -> float:
+        """Simple 0-1 confidence: confirmed + recent detection = high."""
+        base = 0.5 if state.confirmed else 0.2
+        bonus = 0.5 if raw is not None else 0.0
+        penalty = min(0.05 * state.missed, 0.4)
+        return max(0.0, min(1.0, base + bonus - penalty))
