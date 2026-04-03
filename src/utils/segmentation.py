@@ -4,22 +4,11 @@ from src.models.track_point import TrackPoint
 
 # ── Tunable constants ────────────────────────────────────────────────────────
 
-# Maximum frame gap inside one delivery (frames)
-MAX_INTRA_GAP = 6
-
-# Minimum tracked points to consider a sequence a real delivery
-MIN_POINTS = 20
-
-# Minimum total displacement (px) across the sequence
+MAX_INTRA_GAP = 4
+MIN_POINTS = 20  # back to 20 — 25 is too strict for short videos
 MIN_DISPLACEMENT = 20
-
-# Minimum x standard deviation to accept as "real lateral movement"
 MIN_X_STD_SIDE = 8
-
-# Minimum y range to accept as "real forward movement"
 MIN_Y_RANGE_FRONT = 20
-
-# Maximum frame gap between deliveries — larger gap = new delivery
 INTER_DELIVERY_GAP = 45
 
 
@@ -30,6 +19,10 @@ def segment_deliveries(detections: list,
 
     detections = sorted(detections, key=lambda d: d.frame)
 
+    # Adaptive MIN_POINTS — short videos need a lower bar
+    total_frames = detections[-1].frame - detections[0].frame + 1
+    adaptive_min = max(10, min(25, total_frames // 20))
+
     # ── Step 1: split by large frame gaps ────────────────────────
     raw_segments: list[list] = []
     current: list = [detections[0]]
@@ -37,7 +30,7 @@ def segment_deliveries(detections: list,
     for det in detections[1:]:
         gap = det.frame - current[-1].frame
         if gap > MAX_INTRA_GAP:
-            if len(current) >= MIN_POINTS:
+            if len(current) >= adaptive_min:
                 raw_segments.append(current)
             current = [det]
         else:
@@ -54,13 +47,14 @@ def segment_deliveries(detections: list,
     # ── Step 2b: duration-split anything still too long ───────────
     duration_split: list[list] = []
     for seg in direction_split:
-        duration_split.extend(_split_by_duration(seg, max_frames=90))
+        duration_split.extend(_split_by_duration(seg, max_frames=90, min_pts=adaptive_min))
+
     direction_split = duration_split
 
     # ── Step 3: filter noise segments ─────────────────────────────
     valid: list[list] = []
     for seg in direction_split:
-        if len(seg) < MIN_POINTS:
+        if len(seg) < adaptive_min:
             continue
         if not _has_real_movement(seg, view):
             continue
@@ -76,7 +70,7 @@ def segment_deliveries(detections: list,
 
 # ── Private helpers ──────────────────────────────────────────────────────────
 
-def _split_by_duration(seg: list, max_frames: int = 90) -> list[list]:
+def _split_by_duration(seg: list, max_frames: int = 90, min_pts: int = 20) -> list[list]:
     """Split a segment that is too long to be a single delivery."""
     if len(seg) <= max_frames:
         return [seg]
@@ -90,13 +84,13 @@ def _split_by_duration(seg: list, max_frames: int = 90) -> list[list]:
 
         # Split if we've exceeded max duration OR there's a gap in detections
         if frame_span > max_frames or gap > 6:
-            if len(current) >= MIN_POINTS:
+            if len(current) >= min_pts:
                 result.append(current)
             current = [seg[i]]
         else:
             current.append(seg[i])
 
-    if len(current) >= MIN_POINTS:
+    if len(current) >= min_pts:
         result.append(current)
 
     return result if result else [seg]

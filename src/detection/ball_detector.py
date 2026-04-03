@@ -11,13 +11,16 @@ try:
 except ImportError:
     _YOLO_AVAILABLE = False
 
-# Classes YOLO mistakes the cricket ball for
+# YOLO classes that fire on a cricket ball
 _BALL_CLASSES = {
     29,   # frisbee
     32,   # sports ball
+    33,   # kite
     36,   # skateboard
+    37,   # baseball bat (sometimes fires on ball)
+    38,   # baseball glove
 }
-_MIN_CONF = 0.10   # low threshold — trajectory filter handles false positives
+_MIN_CONF = 0.08
 
 
 @dataclass
@@ -53,7 +56,7 @@ class BallDetector:
         )
 
         self._frame_idx = 0
-        self._recent: deque = deque(maxlen=8)  # (frame_idx, x, y, r)
+        self._recent: deque = deque(maxlen=8)
 
     # ------------------------------------------------------------------
 
@@ -61,30 +64,23 @@ class BallDetector:
         return self.process_frame(frame)
 
     def process_frame(self, frame: np.ndarray):
-        # ── Run YOLO ──────────────────────────────────────────────
-        results = self._model(frame, conf=_MIN_CONF, verbose=False)
-        boxes   = results[0].boxes
+        results  = self._model(frame, conf=_MIN_CONF, verbose=False)
+        boxes    = results[0].boxes
 
-        # Collect all candidate detections from ball-like classes
         candidates = []
         for box in boxes:
-            cls  = int(box.cls[0])
+            cls = int(box.cls[0])
             if cls not in _BALL_CLASSES:
                 continue
             conf = float(box.conf[0])
             x1, y1, x2, y2 = box.xyxy[0]
             cx = float((x1 + x2) / 2)
             cy = float((y1 + y2) / 2)
-            r  = float(min(x2 - x1, y2 - y1) / 4)  # tighter radius estimate
-            r  = max(r, 5.0)                          # minimum 5px 
+            r  = max(float(min(x2 - x1, y2 - y1) / 4), 5.0)
             candidates.append((cx, cy, r, conf))
 
-        # Sort by confidence
         candidates.sort(key=lambda c: -c[3])
-        if self._frame_idx % 30 == 0 and candidates:
-            print(f"[YOLO] frame={self._frame_idx} candidates={[(int(c[0]),int(c[1]),f'{c[3]:.2f}') for c in candidates[:3]]}")
 
-        # Pick candidate most consistent with recent trajectory
         candidate = self._trajectory_filter(candidates)
 
         state: TrackState = self._tracker.update(
@@ -98,8 +94,6 @@ class BallDetector:
             return None
 
         if not self._has_trajectory_confidence():
-            if self._frame_idx % 30 == 0:
-                print(f"[TRAJ] frame={self._frame_idx} recent={len(self._recent)} has_conf={self._has_trajectory_confidence()}")
             return None
 
         yolo_conf = candidate[3] if candidate else 0.0
@@ -130,8 +124,6 @@ class BallDetector:
         return "yolo"
 
     # ------------------------------------------------------------------
-    # Trajectory filter
-    # ------------------------------------------------------------------
 
     def _trajectory_filter(self, candidates: list[tuple]) -> tuple | None:
         if not candidates:
@@ -143,7 +135,6 @@ class BallDetector:
             return best
 
         pred_x, pred_y = self._predict_next()
-
         MAX_DIST = 120
         best_candidate = None
         best_dist = MAX_DIST
@@ -178,10 +169,5 @@ class BallDetector:
         recent_list = list(self._recent)
         xs = [p[1] for p in recent_list]
         ys = [p[2] for p in recent_list]
-
-        # Must have moved at least 10px total
         total_disp = ((xs[-1]-xs[0])**2 + (ys[-1]-ys[0])**2) ** 0.5
-        if total_disp < 10:
-            return False
-
-        return True
+        return total_disp >= 10

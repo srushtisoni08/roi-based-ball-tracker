@@ -1,6 +1,7 @@
 import cv2
 import json
 import os
+import numpy as np
 from collections import deque
 from src.config import CFG
 from src.models.track_point import TrackPoint
@@ -41,12 +42,12 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    detector       = BallDetector(height, width, quality)
-    all_detections: list[TrackPoint] = []
-    trail          = deque(maxlen=50)
-    completed      : list[DeliveryResult] = []
-    bounce_markers : dict[int, tuple] = {}
-    banner_until   : dict[int, int]   = {}
+    detector        = BallDetector(height, width, quality)
+    all_detections  : list[TrackPoint] = []
+    trail           = deque(maxlen=50)
+    completed       : list[DeliveryResult] = []
+    bounce_markers  : dict[int, tuple] = {}
+    banner_until    : dict[int, int]   = {}
 
     frame_no = 0
     while True:
@@ -55,13 +56,10 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
             break
 
         det = detector.detect(frame)
-        det = detector.detect(frame)
         if det:
             det.frame = frame_no
             all_detections.append(det)
             trail.append((int(det.x), int(det.y)))
-            if frame_no % 30 == 0:  # print once per second
-                print(f"[DEBUG] frame={frame_no} x={det.x} y={det.y} r={det.radius:.1f} conf={det.confidence:.2f}")
 
         # ── Draw ──────────────────────────────────────────────────
         vis = frame.copy()
@@ -72,7 +70,7 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         draw_ball_trail(vis, trail)
 
         if det:
-            cv2.circle(vis, (int(det.x), int(det.y)), int(det.radius) + 3,
+            cv2.circle(vis, (int(det.x), int(det.y)), max(1, int(det.radius)) + 3,
                        CFG["color_ball"], 2, cv2.LINE_AA)
 
         for ball_no, pt in bounce_markers.items():
@@ -103,7 +101,6 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
     cv2.destroyAllWindows()
 
     # ── Post-process all deliveries ──────────────────────────────
-    # Pass view so segmenter uses the right movement axis
     deliveries = segment_deliveries(all_detections, view=view)
     results    = []
 
@@ -121,7 +118,6 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         end_f   = delivery[-1].frame
         dur     = (end_f - start_f) / fps
 
-        # Find the frame closest to bounce_point x (side) or y (front)
         bounce_frame = None
         if bounce_pt and bounced:
             ref = bounce_pt[0] if view == "side" else bounce_pt[1]
@@ -146,21 +142,13 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
             bounce_markers[i] = bounce_pt
 
         b_str = "BOUNCED  ↓" if bounced else "FULL TOSS →"
-        l_col = {"Yorker": "\033[92m", "Full": "\033[94m",
-                  "Good": "\033[96m", "Short": "\033[91m"}.get(length, "")
-        reset = "\033[0m"
-        print(f"  Ball {i:>2}:  {b_str:<14}  Length: {l_col}{length:<8}{reset}"
-              f"  ({len(delivery)} pts, {dur:.2f}s)")
+        print(f"  Ball {i:>2}:  {b_str:<14}  ({len(delivery)} pts, {dur:.2f}s)")
 
     print("=" * 58)
     bounced_count   = sum(1 for r in results if r.bounced)
     no_bounce_count = sum(1 for r in results if r.bounced is False)
     print(f"  Pitched deliveries : {bounced_count}")
     print(f"  Full tosses        : {no_bounce_count}")
-    print(f"  Length breakdown   : " + "  ".join(
-        f"{k}={sum(1 for r in results if r.length == k)}"
-        for k in ["Yorker", "Full", "Good", "Short"]
-    ))
     print("=" * 58)
 
     # ── Save JSON ────────────────────────────────────────────────
@@ -172,13 +160,10 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         "total_deliveries": len(results),
         "pitched": bounced_count,
         "full_toss": no_bounce_count,
-        "length_summary": {k: sum(1 for r in results if r.length == k)
-                           for k in ["Yorker", "Full", "Good", "Short"]},
         "deliveries": [
             {
                 "ball": r.ball_no,
                 "bounced": r.bounced,
-                "length": r.length,
                 "bounce_point": r.bounce_point,
                 "bounce_frame": r.bounce_frame,
                 "start_frame": r.start_frame,
@@ -200,7 +185,3 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         print(f"[INFO] Video saved  : {output_path}")
 
     return report
-
-
-# numpy needed for argmin in bounce frame lookup
-import numpy as np
