@@ -55,7 +55,7 @@ def analyse_front(track: list[TrackPoint], fps: float, frame_height: int) -> tup
     else:
         # No bounce detected — use the lowest Y reached (furthest point)
         ref_y = min(ys)
-
+    print(f"[LENGTH] ref_y={ref_y} frame_height={frame_height} y_frac={ref_y/frame_height:.2f} bounce_i={bounce_i}")
     y_frac = ref_y / frame_height
     length = _classify_length_front(y_frac)
 
