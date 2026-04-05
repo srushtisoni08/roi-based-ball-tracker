@@ -126,4 +126,4 @@ def print_report(bounce_m: dict,
 
     if mean_conf is not None:
         print(f"  Mean confidence      : {mean_conf:.2f}")
-    print(sep)
+    print(sep)  

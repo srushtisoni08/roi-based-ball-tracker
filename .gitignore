@@ -2,5 +2,3 @@ __pycache__/
 *.pyc
 venv/
 data/*
-yolov8n.pt
-*.pt
