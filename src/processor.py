@@ -101,7 +101,7 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
     cv2.destroyAllWindows()
 
     # ── Post-process all deliveries ──────────────────────────────
-    deliveries = segment_deliveries(all_detections, view=view)
+    deliveries = segment_deliveries(all_detections, view=view, fps=fps)
     results    = []
 
     print("=" * 58)

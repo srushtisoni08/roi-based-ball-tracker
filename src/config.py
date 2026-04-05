@@ -20,19 +20,21 @@ CFG = {
     "circularity_mob":  0.40,
 
     # ── Delivery segmentation ──────────────────────────────────────────
-    # A real delivery at 30fps takes 15–25 frames (fast ball ~0.6s).
-    # min_track_frames at 25 was dropping real deliveries. Set to 8.
-    # Static blobs are killed separately by the displacement filter below.
-    "min_track_frames":    8,
-    # 45 frames = 1.5 s gap between deliveries at 30 fps.
-    # 90 frames meant consecutive deliveries merged into one track.
-    "delivery_gap_frames": 20,
+    # A real delivery at 30fps takes 25–60 frames.
+    # min_track_frames at 15 handles short/fast deliveries.
+    "min_track_frames":    15,
+    # 60 frames = 2s gap between deliveries at 30 fps.
+    # Previously 20 — too short, caused one delivery to be split at brief
+    # detection gaps (ball behind batsman, in shadow, etc.).
+    "delivery_gap_frames": 60,
 
     # ── Trajectory / noise filter ──────────────────────────────────────
     "max_interframe_jump_px": 120,   # ball moves fast; 80 was too strict
-    "max_interp_gap_frames":  4,
-    "direction_reversal_px":  250,
-    "min_travel_before_reversal_px": 150,
+    "max_interp_gap_frames":  10,    # raised from 4 — allow brief loss of ball
+    # Reversal threshold — raised from 250 to 300 so a bounce arc's small
+    # Y-axis reversal does not look like a new delivery on the X axis.
+    "direction_reversal_px":  300,
+    "min_travel_before_reversal_px": 200,  # raised from 150
 
     # ── Movement filter (NEW) ──────────────────────────────────────────
     # A valid delivery track must displace at least this many px total.

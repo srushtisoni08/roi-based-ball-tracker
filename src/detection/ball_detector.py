@@ -55,12 +55,14 @@ class BallDetector:
         # Initialize motion detector
         self._motion_detector = MotionDetector(blur_ksize=5, min_area=20)
         
-        # Tracker
+        # Tracker — require 3 consecutive hits to confirm a track.
+        # This prevents short noise bursts (2-frame blobs from nets, pads)
+        # from ever becoming confirmed detections.
         self._tracker = BallTracker(
             process_noise=1e-2,
             measurement_noise=5e-2,
-            max_missed=12,
-            confirm_hits=2,
+            max_missed=10,
+            confirm_hits=3,
         )
         
         self._frame_idx = 0
@@ -391,11 +393,16 @@ class BallDetector:
         return x2 + (x2 - x1), y2 + (y2 - y1)
 
     def _has_trajectory_confidence(self) -> bool:
-        """Check if trajectory is confident enough."""
+        """Check if trajectory is confident enough.
+        
+        Require at least 3 recent points with a minimum total displacement
+        of 20px. This filters out static blobs (pads, stumps, nets) that
+        were passing through because they barely moved at all.
+        """
         if len(self._recent) < 3:
             return False
         recent_list = list(self._recent)
         xs = [p[1] for p in recent_list]
         ys = [p[2] for p in recent_list]
         total_disp = ((xs[-1]-xs[0])**2 + (ys[-1]-ys[0])**2) ** 0.5
-        return total_disp >= 10
+        return total_disp >= 20
