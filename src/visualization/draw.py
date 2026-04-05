@@ -1,268 +1,220 @@
 import cv2
 import numpy as np
-from typing import Sequence
 from collections import deque
+from src.config import CFG, LENGTH_COLORS
+from src.models.delivery_result import DeliveryResult
 
 
-# ── Zone colour map (BGR, semi-transparent) ───────────────────────────────────
-_ZONE_COLORS = {
-    "yorker": (50,  50, 200),
-    "full":   (50, 160, 200),
-    "good":   (50, 200,  80),
-    "short":  (200, 80,  50),
-}
-
-_HUD_BG      = (20, 20, 20)
-_HUD_TEXT    = (230, 230, 230)
-_BOUNCE_DOT  = (30, 30, 220)
-_TRAJ_COLOR  = (0, 220, 255)
-_BALL_RING   = {
-    "high":   (50, 220, 50),
-    "mid":    (30, 160, 255),
-    "low":    (50,  50, 200),
-}
-
-_FONT = cv2.FONT_HERSHEY_SIMPLEX
+# ── Trail history per ball (persists across frames) ──────────────
+_ball_trails: dict[int, list] = {}
 
 
-# ── Already in your file ──────────────────────────────────────────────────────
+def add_to_trail(ball_no: int, pt: tuple, maxlen: int = 80):
+    if ball_no not in _ball_trails:
+        _ball_trails[ball_no] = []
+    _ball_trails[ball_no].append(pt)
+    if len(_ball_trails[ball_no]) > maxlen:
+        _ball_trails[ball_no].pop(0)
 
-def draw_pitch_zones(frame, zones, alpha=0.20):
-    overlay = frame.copy()
+
+def clear_trail(ball_no: int):
+    _ball_trails[ball_no] = []
+
+
+def reset_all_trails():
+    _ball_trails.clear()
+
+
+# ── HUD ──────────────────────────────────────────────────────────
+def draw_hud(frame, results_so_far, current_ball_no, total_balls=6):
     h, w = frame.shape[:2]
-    for name, (y0, y1) in zones.items():
-        color = _ZONE_COLORS.get(name.lower(), (128, 128, 128))
-        cv2.rectangle(overlay, (0, y0), (w, y1), color, -1)
-        ly = y0 + (y1 - y0) // 2 + 5
-        cv2.putText(overlay, name.upper(), (6, ly), _FONT, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
-    return frame
+    rows        = max(len(results_so_far), 1)
+    box_w       = 280
+    box_h       = 48 + 30 * rows + 12
+    pad         = 10
 
-
-def draw_trajectory(frame, trajectory, max_points=40, thickness=2):
-    if len(trajectory) < 2:
-        return frame
-    pts = [(int(p[0]), int(p[1])) for p in trajectory[-max_points:]]
-    n = len(pts)
+    # Semi-transparent background
     overlay = frame.copy()
-    for i in range(1, n):
-        alpha_i = i / n
-        color = tuple(int(c * alpha_i) for c in _TRAJ_COLOR)
-        cv2.line(overlay, pts[i - 1], pts[i], color, thickness, cv2.LINE_AA)
-    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
-    if n >= 2:
-        cv2.line(frame, pts[-2], pts[-1], _TRAJ_COLOR, thickness, cv2.LINE_AA)
-    return frame
+    cv2.rectangle(overlay, (pad, pad), (pad + box_w, pad + box_h),
+                  (15, 15, 15), -1)
+    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
+
+    # Border line
+    cv2.rectangle(frame, (pad, pad), (pad + box_w, pad + box_h),
+                  (80, 80, 80), 1, cv2.LINE_AA)
+
+    # Title
+    cv2.putText(frame, "DELIVERY  ANALYSIS", (pad + 12, pad + 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (230, 230, 230), 1, cv2.LINE_AA)
+
+    # Divider
+    cv2.line(frame, (pad + 8, pad + 30), (pad + box_w - 8, pad + 30),
+             (70, 70, 70), 1, cv2.LINE_AA)
+
+    for i, res in enumerate(results_so_far):
+        y = pad + 52 + i * 30
+
+        # Row highlight for latest ball
+        if res.ball_no == current_ball_no - 1:
+            hl = frame.copy()
+            cv2.rectangle(hl, (pad + 4, y - 14), (pad + box_w - 4, y + 8),
+                          (40, 40, 40), -1)
+            cv2.addWeighted(hl, 0.5, frame, 0.5, 0, frame)
+
+        b_label = "BOUNCED" if res.bounced else "FULL TOSS"
+        b_color = CFG["color_bounce"] if res.bounced else CFG["color_no_bounce"]
+        l_color = LENGTH_COLORS.get(res.length, (200, 200, 200))
+
+        # Ball number
+        cv2.putText(frame, f"B{res.ball_no}", (pad + 12, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, (180, 180, 180), 1, cv2.LINE_AA)
+
+        # Bounce status dot + label
+        dot_x = pad + 52
+        cv2.circle(frame, (dot_x, y - 4), 5, b_color, -1, cv2.LINE_AA)
+        cv2.putText(frame, b_label, (dot_x + 10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, b_color, 1, cv2.LINE_AA)
+
+        # Length tag with background pill
+        l_text  = res.length
+        (tw, th), _ = cv2.getTextSize(l_text, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
+        pill_x  = pad + box_w - tw - 22
+        cv2.rectangle(frame, (pill_x - 4, y - th - 2), (pill_x + tw + 4, y + 3),
+                      l_color, -1, cv2.LINE_AA)
+        cv2.putText(frame, l_text, (pill_x, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (10, 10, 10), 1, cv2.LINE_AA)
 
 
-def draw_ball(frame, x, y, radius, confidence=1.0, label=""):
-    cx, cy, r = int(x), int(y), max(1, int(radius))
-    ring_color = _BALL_RING["high"] if confidence >= 0.65 else \
-                 _BALL_RING["mid"]  if confidence >= 0.35 else _BALL_RING["low"]
-    cv2.circle(frame, (cx, cy), r + 3, ring_color, 2, cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), r, (255, 255, 255), 1, cv2.LINE_AA)
-    if label:
-        cv2.putText(frame, label, (cx + r + 5, cy), _FONT, 0.45, ring_color, 1, cv2.LINE_AA)
-    return frame
-
-
-def draw_bounce_marker(frame, pt_or_x, label_or_y=None, *args, **kwargs):
+# ── Ball trail ───────────────────────────────────────────────────
+def draw_ball_trail(frame, trail, ball_no: int = 0):
     """
-    Flexible signature — processor.py calls it as:
-        draw_bounce_marker(vis, (x, y), "Ball 1")
-    The new API also supports:
-        draw_bounce_marker(frame, x, y, frame_idx, bounce_frame)
+    Draw a fading, thick trail with a glow effect.
+    Accepts either the live deque (from processor) or the per-ball trail dict.
     """
-    # Old processor.py call: draw_bounce_marker(vis, (x,y), label_str)
-    if isinstance(pt_or_x, (tuple, list)):
-        x, y = pt_or_x
-        cx, cy = int(x), int(y)
-        cv2.circle(frame, (cx, cy), 6, _BOUNCE_DOT, -1, cv2.LINE_AA)
-        cv2.circle(frame, (cx, cy), 12, _BOUNCE_DOT, 1, cv2.LINE_AA)
-        label = label_or_y or ""
-        if label:
-            cv2.putText(frame, str(label), (cx + 10, cy - 8),
-                        _FONT, 0.45, _BOUNCE_DOT, 1, cv2.LINE_AA)
-        return frame
-
-    # New API: draw_bounce_marker(frame, x, y, frame_idx, bounce_frame, pulse_frames=30)
-    x = pt_or_x
-    y = label_or_y
-    frame_idx  = args[0] if len(args) > 0 else kwargs.get("frame_idx", 0)
-    bounce_frm = args[1] if len(args) > 1 else kwargs.get("bounce_frame", 0)
-    pulse      = args[2] if len(args) > 2 else kwargs.get("pulse_frames", 30)
-
-    age = frame_idx - bounce_frm
-    if age < 0 or age > pulse:
-        return frame
-    alpha = 1.0 - age / pulse
-    cx, cy = int(x), int(y)
-    color = tuple(int(c * alpha) for c in _BOUNCE_DOT)
-    cv2.circle(frame, (cx, cy), 6, color, -1, cv2.LINE_AA)
-    cv2.circle(frame, (cx, cy), 8 + age,
-               tuple(int(c * alpha * 0.7) for c in _BOUNCE_DOT), 1, cv2.LINE_AA)
-    return frame
-
-
-def draw_hud(frame, completed_or_frame_idx, ball_no_or_bounce=None,
-             bounce_frame=None, length=None, confidence=None, pos="top-left"):
-    """
-    Flexible HUD — supports both call signatures:
-
-    Old (processor.py):
-        draw_hud(vis, completed_list, current_ball_no)
-
-    New API:
-        draw_hud(frame, frame_idx, bounce_detected, bounce_frame, length, confidence)
-    """
-    h, w = frame.shape[:2]
-
-    # ── Detect which call style ───────────────────────────────────
-    if isinstance(completed_or_frame_idx, list):
-        # Old style: draw_hud(vis, completed, ball_no)
-        completed = completed_or_frame_idx
-        ball_no   = ball_no_or_bounce or 0
-
-        bounced_list = [r for r in completed if r.bounced]
-        last = completed[-1] if completed else None
-
-        lines = [
-            f"Ball No  : {ball_no}",
-            f"Pitched  : {len(bounced_list)}",
-            f"Length   : {last.length.upper() if last and last.length else '—'}",
-            f"Bounce   : {'YES' if last and last.bounced else 'NO'}",
-        ]
-    else:
-        # New style
-        frame_idx       = completed_or_frame_idx
-        bounce_detected = bool(ball_no_or_bounce)
-        lines = [
-            f"Frame    : {frame_idx}",
-            f"Bounce   : {'YES (fr ' + str(bounce_frame) + ')' if bounce_detected else 'NO'}",
-            f"Length   : {length.upper() if length else '—'}",
-            f"Conf     : {confidence:.2f}" if confidence is not None else "Conf     : —",
-        ]
-
-    pad, line_h, box_w = 8, 22, 220
-    box_h = pad * 2 + line_h * len(lines)
-
-    if pos == "top-right":
-        x0, y0 = w - box_w - 10, 10
-    elif pos == "bottom-left":
-        x0, y0 = 10, h - box_h - 10
-    elif pos == "bottom-right":
-        x0, y0 = w - box_w - 10, h - box_h - 10
-    else:
-        x0, y0 = 10, 10
-
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), _HUD_BG, -1)
-    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
-    cv2.rectangle(frame, (x0, y0), (x0 + box_w, y0 + box_h), (80, 80, 80), 1)
-
-    for i, line in enumerate(lines):
-        ty = y0 + pad + (i + 1) * line_h - 4
-        color = _HUD_TEXT
-        if "YES" in line:
-            color = _BOUNCE_DOT
-        cv2.putText(frame, line, (x0 + pad, ty), _FONT, 0.45, color, 1, cv2.LINE_AA)
-
-    return frame
-
-
-# ── NEW functions that processor.py needs ────────────────────────────────────
-
-def draw_ball_trail(frame: np.ndarray,
-                    trail,
-                    max_points: int = 50,
-                    thickness: int = 2) -> np.ndarray:
-    """
-    Draw the ball trail from a deque/list of (x, y) tuples.
-    Older points fade out.
-
-    Called in processor.py as:  draw_ball_trail(vis, trail)
-    """
-    pts = list(trail)[-max_points:]
+    pts = list(trail)
     if len(pts) < 2:
-        return frame
+        return
 
     n = len(pts)
     for i in range(1, n):
-        alpha_i = i / n
-        color = tuple(int(c * alpha_i) for c in _TRAJ_COLOR)
-        p1 = (int(pts[i - 1][0]), int(pts[i - 1][1]))
-        p2 = (int(pts[i][0]),     int(pts[i][1]))
-        cv2.line(frame, p1, p2, color, thickness, cv2.LINE_AA)
+        alpha   = i / n                          # 0=old → 1=newest
+        base_c  = CFG["color_trail"]
 
-    return frame
+        # Colour fades from dim to full
+        color = (
+            int(base_c[0] * alpha),
+            int(base_c[1] * alpha),
+            int(base_c[2] * alpha),
+        )
+
+        # Thickness grows toward the newest point
+        thickness = max(1, int(1 + 3 * alpha))
+
+        cv2.line(frame, pts[i - 1], pts[i], color, thickness, cv2.LINE_AA)
+
+    # Glow on the last few points
+    glow_pts = pts[max(0, n - 8):]
+    for i in range(1, len(glow_pts)):
+        cv2.line(frame, glow_pts[i - 1], glow_pts[i],
+                 (255, 255, 255), 1, cv2.LINE_AA)
+
+    # Bright dot at the very tip
+    if pts:
+        cv2.circle(frame, pts[-1], 4, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, pts[-1], 6, CFG["color_ball"], 1, cv2.LINE_AA)
 
 
-def draw_length_banner(frame: np.ndarray,
-                       result,
-                       frame_no: int,
-                       banner_until: dict,
-                       display_frames: int = 60) -> np.ndarray:
-    """
-    Show a large centred length banner for a short time after a delivery.
+# ── Bounce marker ────────────────────────────────────────────────
+def draw_bounce_marker(frame, pt, label=""):
+    x, y = pt
 
-    Called in processor.py as:
-        draw_length_banner(vis, res, frame_no, banner_until)
+    # Outer pulse ring
+    cv2.circle(frame, (x, y), 18, CFG["color_bounce"],  1, cv2.LINE_AA)
+    cv2.circle(frame, (x, y), 12, CFG["color_bounce"],  2, cv2.LINE_AA)
 
-    `result`       – a DeliveryResult with .ball_no, .length, .bounced
-    `banner_until` – dict[ball_no → last_frame] maintained by processor.py
-    """
-    ball_no = result.ball_no
+    # Inner filled dot
+    cv2.circle(frame, (x, y),  4, CFG["color_bounce"], -1, cv2.LINE_AA)
 
-    # Register the banner end-frame the first time we see this delivery
-    if ball_no not in banner_until:
-        banner_until[ball_no] = frame_no + display_frames
+    # Cross-hair lines
+    cv2.line(frame, (x - 20, y), (x - 13, y), CFG["color_bounce"], 1, cv2.LINE_AA)
+    cv2.line(frame, (x + 13, y), (x + 20, y), CFG["color_bounce"], 1, cv2.LINE_AA)
+    cv2.line(frame, (x, y - 20), (x, y - 13), CFG["color_bounce"], 1, cv2.LINE_AA)
+    cv2.line(frame, (x, y + 13), (x, y + 20), CFG["color_bounce"], 1, cv2.LINE_AA)
 
-    if frame_no > banner_until[ball_no]:
-        return frame
+    # Label with background
+    if label:
+        txt = "BOUNCE"
+        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
+        lx, ly = x + 22, y - 6
+        cv2.rectangle(frame, (lx - 3, ly - th - 2), (lx + tw + 3, ly + 3),
+                      (10, 10, 10), -1)
+        cv2.putText(frame, txt, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.46, CFG["color_bounce"], 1, cv2.LINE_AA)
+
+
+# ── Bottom banner ────────────────────────────────────────────────
+def draw_length_banner(frame, result: DeliveryResult, frame_no: int,
+                       banner_until: dict):
+    if result is None:
+        return
+    if frame_no > banner_until.get(result.ball_no, 0):
+        return
 
     h, w = frame.shape[:2]
-    length = result.length or "—"
-    b_text = "BOUNCE" if result.bounced else "FULL TOSS"
+    color  = LENGTH_COLORS.get(result.length, (200, 200, 200))
+    b_str  = "BOUNCED" if result.bounced else "FULL TOSS"
+    label  = f"Ball {result.ball_no}   {b_str}   {result.length.upper()}"
 
-    bg_color = _ZONE_COLORS.get(length.lower(), (60, 60, 60))
-
-    # Banner background strip
-    by0, by1 = h // 2 - 30, h // 2 + 30
+    # Banner background
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, by0), (w, by1), bg_color, -1)
-    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    cv2.rectangle(overlay, (0, h - 60), (w, h), (10, 10, 10), -1)
+    cv2.addWeighted(overlay, 0.70, frame, 0.30, 0, frame)
 
-    # Length text (large, centred)
-    text = f"{length.upper()}  |  {b_text}"
-    (tw, th), _ = cv2.getTextSize(text, _FONT, 1.1, 2)
-    tx = (w - tw) // 2
-    ty = h // 2 + th // 2
-    cv2.putText(frame, text, (tx, ty), _FONT, 1.1, (255, 255, 255), 2, cv2.LINE_AA)
+    # Coloured accent bar at top of banner
+    cv2.rectangle(frame, (0, h - 60), (w, h - 56), color, -1)
 
-    return frame
+    # Centred text
+    (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 0.72, 2)
+    tx = max(8, (w - tw) // 2)
+    cv2.putText(frame, label, (tx, h - 22),
+                cv2.FONT_HERSHEY_DUPLEX, 0.72, color, 2, cv2.LINE_AA)
 
 
-def draw_pitch_zones_side(frame: np.ndarray,
-                          alpha: float = 0.15) -> np.ndarray:
-    """
-    Draw standard cricket pitch length zones for a side-view camera.
-
-    Zones are expressed as fractions of frame height so they adapt to
-    any resolution automatically.
-
-    Called in processor.py as:  draw_pitch_zones_side(vis)
-    """
+# ── Pitch zone overlay (side view) ──────────────────────────────
+def draw_pitch_zones_side(frame):
     h, w = frame.shape[:2]
 
-    # Approximate zone boundaries (fraction of frame height, top=0)
-    zone_fractions = {
-        "yorker": (0.75, 0.88),
-        "full":   (0.62, 0.75),
-        "good":   (0.48, 0.62),
-        "short":  (0.30, 0.48),
-    }
+    overlay = frame.copy()
 
-    zones_px = {name: (int(f0 * h), int(f1 * h))
-                for name, (f0, f1) in zone_fractions.items()}
+    for name, (lo, hi) in CFG["length_zones_side"].items():
+        x1    = int(lo * w)
+        x2    = int(hi * w)
+        color = LENGTH_COLORS.get(name, (200, 200, 200))
 
-    return draw_pitch_zones(frame, zones_px, alpha=alpha)
+        # Subtle full-height shaded column
+        cv2.rectangle(overlay, (x1, int(h * 0.30)), (x2, int(h * 0.82)),
+                      color, -1)
+
+    cv2.addWeighted(overlay, 0.07, frame, 0.93, 0, frame)
+
+    # Zone boundary lines + labels at top
+    for name, (lo, hi) in CFG["length_zones_side"].items():
+        x1    = int(lo * w)
+        x2    = int(hi * w)
+        mid_x = (x1 + x2) // 2
+        color = LENGTH_COLORS.get(name, (200, 200, 200))
+
+        # Boundary line
+        cv2.line(frame, (x1, int(h * 0.28)), (x1, int(h * 0.84)),
+                 (*color, 120), 1, cv2.LINE_AA)
+
+        # Zone name label
+        (tw, th), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        lx = mid_x - tw // 2
+        ly = int(h * 0.27)
+
+        # Label background
+        cv2.rectangle(frame, (lx - 3, ly - th - 2), (lx + tw + 3, ly + 2),
+                      (15, 15, 15), -1)
+        cv2.putText(frame, name, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1, cv2.LINE_AA)

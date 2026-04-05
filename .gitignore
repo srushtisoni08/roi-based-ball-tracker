@@ -1,4 +1,6 @@
 __pycache__/
 *.pyc
+data/output_videos/
+data/reports/
 venv/
-data/*
+data/input_videos

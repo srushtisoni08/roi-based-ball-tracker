@@ -1,67 +1,44 @@
-import numpy as np
-
 CFG = {
-    # ── Background subtractor ──────────────────────────────────────────
-    # Lower history: bg model adapts faster, so a new ball registers as
-    # foreground immediately instead of being absorbed into the background.
-    "bg_history":       200,
-    "bg_var_threshold": 50,
+    # Background subtractor
+    "bg_history":       100,
+    "bg_var_threshold": 16,
 
-    # ── Ball size (fraction of frame height) ───────────────────────────
-    "ball_min_radius_frac": 0.005,
-    "ball_max_radius_frac": 0.022,   # tighter max: rules out stumps/pads
+    # Ball size (fraction of frame height)
+    "ball_min_radius_frac": 0.004,
+    "ball_max_radius_frac": 0.030,
 
-    # ── Area filter in pixels² ─────────────────────────────────────────
-    "ball_min_area_px":  25,
-    "ball_max_area_px": 1800,        # tighter than 2500: pads/nets are larger
+    # Area filter in pixels²
+    # Ball at 478x850 is ~5-20px radius = ~80-1200 px² area
+    # A person/arm blob is 5000-50000 px² — this kills those
+    "ball_min_area_px": 20,
+    "ball_max_area_px": 1200,
 
-    # ── Circularity ────────────────────────────────────────────────────
-    "circularity_pro":  0.55,        # raised: net mesh blobs are rarely circular
-    "circularity_mob":  0.40,
+    # Circularity
+    "circularity_pro":  0.45,
+    "circularity_mob":  0.30,
 
-    # ── Delivery segmentation ──────────────────────────────────────────
-    # A real delivery at 30fps takes 25–60 frames.
-    # min_track_frames at 15 handles short/fast deliveries.
-    "min_track_frames":    15,
-    # 60 frames = 2s gap between deliveries at 30 fps.
-    # Previously 20 — too short, caused one delivery to be split at brief
-    # detection gaps (ball behind batsman, in shadow, etc.).
-    "delivery_gap_frames": 60,
+    # Delivery segmentation
+    "min_track_frames":     5,
+    "delivery_gap_frames":  45,
 
-    # ── Trajectory / noise filter ──────────────────────────────────────
-    "max_interframe_jump_px": 120,   # ball moves fast; 80 was too strict
-    "max_interp_gap_frames":  10,    # raised from 4 — allow brief loss of ball
-    # Reversal threshold — raised from 250 to 300 so a bounce arc's small
-    # Y-axis reversal does not look like a new delivery on the X axis.
-    "direction_reversal_px":  300,
-    "min_travel_before_reversal_px": 200,  # raised from 150
+    # Trajectory noise filter
+    "max_interframe_jump_px": 80,
 
-    # ── Movement filter (NEW) ──────────────────────────────────────────
-    # A valid delivery track must displace at least this many px total.
-    # Stationary blobs (pad, foot, stump) score 0–15 px and get dropped.
-    "min_total_displacement_px": 80,
+    # Bounce detection
+    "bounce_reversal_px":  3,
+    "min_descent_frames":  3,
 
-    # Minimum standard deviation of x positions across the track.
-    # Pure noise / static blobs have near-zero x-spread.
-    "min_x_spread_px": 30,
-
-    # ── Bounce detection ───────────────────────────────────────────────
-    "bounce_reversal_px":  2,        # more sensitive (was 3)
-    "min_descent_frames":  2,        # more sensitive (was 3)
-
-    # ── Front view ─────────────────────────────────────────────────────
+    # Front view
     "front_bounce_size_jump": 1.18,
     "front_bounce_window":    8,
 
-    # ── ROI — tighter to exclude bowler run-up and boundary areas ──────
-    # Raised y_min: excludes top of frame where stumps at bowler end live.
-    # Lowered x margins: excludes wide sides where fielders/umpires walk.
-    "roi_x_min_frac": 0.15,
-    "roi_x_max_frac": 0.85,
-    "roi_y_min_frac": 0.30,
-    "roi_y_max_frac": 0.82,
+    # ROI — pitch area only
+    "roi_x_min_frac": 0.08,
+    "roi_x_max_frac": 0.92,
+    "roi_y_min_frac": 0.25,
+    "roi_y_max_frac": 0.80,
 
-    # ── Length zones (side view, x-fraction of frame width) ───────────
+    # Length zones (side view)
     "length_zones_side": {
         "Yorker": (0.80, 1.00),
         "Full":   (0.60, 0.80),
@@ -69,14 +46,14 @@ CFG = {
         "Short":  (0.00, 0.38),
     },
 
-    # ── Annotation colours (BGR) ───────────────────────────────────────
-    "color_bounce":    (0,  220,  80),
+    # Annotation colours (BGR)
+    "color_bounce":    (0,  220, 80),
     "color_no_bounce": (0,  160, 255),
-    "color_yorker":    (0,  220,  80),
+    "color_yorker":    (0,  220, 80),
     "color_full":      (50, 180, 255),
     "color_good":      (0,  200, 255),
-    "color_short":     (0,   80, 255),
-    "color_trail":     (255, 200,   0),
+    "color_short":     (0,  80,  255),
+    "color_trail":     (255, 200, 0),
     "color_ball":      (0,  255, 140),
     "color_hud_bg":    (20,  20,  20),
 }
@@ -87,9 +64,3 @@ LENGTH_COLORS = {
     "Good":   CFG["color_good"],
     "Short":  CFG["color_short"],
 }
-
-
-def _smooth(values, window=3):
-    half = window // 2
-    return [np.mean(values[max(0, i - half): min(len(values), i + half + 1)])
-            for i in range(len(values))]

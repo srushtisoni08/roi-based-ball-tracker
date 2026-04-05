@@ -1,4 +1,3 @@
-import sys
 import os
 import glob
 import argparse
@@ -26,10 +25,9 @@ if __name__ == "__main__":
 
         if not videos:
             print(f"[ERROR] No videos found in folder: {args.folder}")
-            sys.exit(1)
+            exit(1)
 
     print(f"[INFO] Found {len(videos)} video(s) to process\n")
-    sys.stdout.flush()
 
     # ── Process each video ─────────────────────────────────────
     for video_path in videos:
@@ -39,19 +37,11 @@ if __name__ == "__main__":
         print(f"\n{'='*58}")
         print(f"  Processing: {video_name}")
         print(f"{'='*58}")
-        sys.stdout.flush()
 
-        try:
-            process_video(
-                video_path=video_path,
-                view=args.view,
-                output_path=output_path,
-                show=args.show,
-                debug=args.debug,
-            )
-        except Exception as exc:
-            print(f"[ERROR] Failed to process {video_name}: {exc}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            sys.stdout.flush()
+        process_video(
+            video_path=video_path,
+            view=args.view,
+            output_path=output_path,
+            show=args.show,
+            debug=args.debug,
+        )
