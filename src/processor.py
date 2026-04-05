@@ -42,7 +42,7 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    detector        = BallDetector(height, width, quality)
+    detector        = BallDetector(height, width, quality, total_frames=total)
     all_detections  : list[TrackPoint] = []
     trail           = deque(maxlen=50)
     completed       : list[DeliveryResult] = []
@@ -72,6 +72,9 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         if det:
             cv2.circle(vis, (int(det.x), int(det.y)), max(1, int(det.radius)) + 3,
                        CFG["color_ball"], 2, cv2.LINE_AA)
+            if debug and det.raw_cx is not None:
+                # Debug: red dot = raw detector hit, green ring = Kalman position
+                cv2.circle(vis, (int(det.raw_cx), int(det.raw_cy)), 5, (0, 0, 255), -1, cv2.LINE_AA)
 
         for ball_no, pt in bounce_markers.items():
             draw_bounce_marker(vis, pt, f"Ball {ball_no}")

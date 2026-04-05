@@ -192,10 +192,33 @@ def _has_real_movement(seg: list, view: str) -> bool:
     disp    = float(((xs[-1] - xs[0])**2 + (ys[-1] - ys[0])**2) ** 0.5)
 
     if view == "front":
-        ok = (y_range >= MIN_Y_RANGE_FRONT or y_std >= MIN_Y_RANGE_FRONT / 2 or disp >= MIN_DISPLACEMENT)
+        # In a true end-on (front) view the ball travels TOWARD the camera,
+        # so it barely moves in XY pixel space — it mainly grows in radius
+        # and drifts slightly in X (swing/spin).  The old threshold
+        # (y_range >= 40px OR disp >= 80px) incorrectly rejects these.
+        #
+        # Relaxed criteria for front view:
+        #   • Any meaningful lateral drift (x_range >= 15px) — swing/angle
+        #   • OR radius growth — check via the Detection.radius attribute
+        #     if available (all_detections uses Detection objects, not pure
+        #     TrackPoints, so .radius is always set).
+        #   • OR the original Y/disp thresholds for non-end-on setups.
+        rs = np.array([getattr(p, "radius", 0.0) for p in seg])
+        r_growth = float(np.max(rs) - np.min(rs)) if len(rs) > 1 else 0.0
+        r_max    = float(np.max(rs)) if len(rs) > 0 else 0.0
+
+        ok = (
+            y_range >= MIN_Y_RANGE_FRONT        # camera tilted, ball moves in Y
+            or y_std >= MIN_Y_RANGE_FRONT / 2
+            or disp >= MIN_DISPLACEMENT
+            or x_range >= 15                     # lateral drift (swing/angle)
+            or r_growth >= 2.0                   # ball getting bigger (toward camera)
+            or r_max >= 8.0                      # large ball = close = valid detection
+        )
         if not ok:
             print(f"[SKIP] Front-view segment rejected: "
-                  f"y_range={y_range:.1f}px, y_std={y_std:.1f}px, disp={disp:.1f}px")
+                  f"y_range={y_range:.1f}px, y_std={y_std:.1f}px, disp={disp:.1f}px, "
+                  f"x_range={x_range:.1f}px, r_growth={r_growth:.1f}px")
         return ok
     else:
         ok = (x_std >= MIN_X_STD_SIDE or x_range >= MIN_DISPLACEMENT or disp >= MIN_DISPLACEMENT)

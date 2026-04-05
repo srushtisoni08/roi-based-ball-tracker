@@ -36,16 +36,24 @@ class BallDetector:
                  height_or_color=None,
                  width=None,
                  quality=None,
+                 total_frames=None,
                  **kwargs):
         
         self.height = height_or_color if isinstance(height_or_color, int) else 480
         self.width = width if width is not None else 640
         self.quality = quality or "standard"
-        
+
+        # Scale bg_history so warmup never exceeds ~20% of the video.
+        # A 334-frame clip at the default history=200 spends 60% of its
+        # frames training the background model.  Cap at 20% of total_frames.
+        bg_history = CFG.get("bg_history", 200)
+        if total_frames is not None:
+            bg_history = min(bg_history, max(30, total_frames // 5))
+
         # Initialize background subtractor (MOG2)
         self._bg_subtractor = cv2.createBackgroundSubtractorMOG2(
             detectShadows=False,
-            history=CFG.get("bg_history", 200),
+            history=bg_history,
             varThreshold=CFG.get("bg_var_threshold", 50)
         )
         
@@ -188,16 +196,25 @@ class BallDetector:
         Returns: [(cx, cy, radius), ...]
         """
         fg_mask = self._bg_subtractor.apply(frame, learningRate=0.002)
-        
+
+        # Camera-shake guard: if >15% of the ROI is foreground, the whole
+        # frame shifted (hand movement / pan) — no reliable ball detection.
+        roi_pixels = int(np.sum(self._roi_mask > 0)) if self._roi_mask is not None else fg_mask.size
+        if roi_pixels > 0:
+            roi_fg = cv2.bitwise_and(fg_mask, fg_mask, mask=self._roi_mask) if self._roi_mask is not None else fg_mask
+            fg_ratio = np.count_nonzero(roi_fg) / roi_pixels
+            if fg_ratio > 0.15:
+                return []
+
         # Apply morphological operations
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-        
+
         # Apply ROI mask
         if self._roi_mask is not None:
             fg_mask = cv2.bitwise_and(fg_mask, fg_mask, mask=self._roi_mask)
-        
+
         candidates = self._extract_circular_contours(fg_mask)
         return candidates
 

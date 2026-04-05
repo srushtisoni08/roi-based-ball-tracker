@@ -161,5 +161,8 @@ class BallTracker:
         dx   = float(detection[0]) - px
         dy   = float(detection[1]) - py
         dist = (dx**2 + dy**2) ** 0.5
-        gate = pr * self.gate_sigma + 20   # 20 px minimum floor
+        # Base gate: sigma * radius with a minimum floor.
+        # Cap at 80px so that a large predicted radius (e.g. after many coasted
+        # frames) doesn't open the gate wide enough to grab distant noise blobs.
+        gate = min(pr * self.gate_sigma + 20, 80.0)
         return dist < gate
