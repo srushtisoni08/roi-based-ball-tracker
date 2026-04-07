@@ -2,7 +2,12 @@ CFG = {
     # ── Background subtractor ───────────────────────────────────────
     # Shorter history = faster warmup; lower varThreshold = more sensitive
     "bg_history":       150,
-    "bg_var_threshold": 14,
+    "bg_var_threshold": 25,
+    # ── Ball colour filter (yellow tennis/soft ball) ─────────────────
+    "ball_color": "yellow",
+    "ball_hsv_ranges": [
+        ([18, 100, 100], [40, 255, 255]),   # pure yellow
+    ],
 
     # ── Ball size (fraction of frame height) ────────────────────────
     "ball_min_radius_frac": 0.004,
@@ -15,7 +20,7 @@ CFG = {
     # ── Circularity thresholds ──────────────────────────────────────
     # Lower thresholds because motion blur makes ball slightly non-circular
     "circularity_pro":  0.40,
-    "circularity_mob":  0.28,
+    "circularity_mob":  0.52,
 
     # ── Hough fallback parameters ───────────────────────────────────
     "hough_param1": 50,
@@ -23,10 +28,10 @@ CFG = {
 
     # ── Delivery segmentation ───────────────────────────────────────
     "min_track_frames":    4,    # was 5 — catch shorter visible deliveries
-    "delivery_gap_frames": 40,
+    "delivery_gap_frames": 70,
 
     # ── Trajectory noise filter ──────────────────────────────────────
-    "max_interframe_jump_px": 75,
+    "max_interframe_jump_px": 60,
 
     # ── Bounce detection (side view) ────────────────────────────────
     "bounce_reversal_px":  2,
@@ -38,8 +43,8 @@ CFG = {
 
     # ── ROI ──────────────────────────────────────────────────────────
     # Wider vertical range to catch full tosses and short-pitched balls
-    "roi_x_min_frac": 0.05,
-    "roi_x_max_frac": 0.95,
+    "roi_x_min_frac": 0.20,
+    "roi_x_max_frac": 0.80,
     "roi_y_min_frac": 0.18,
     "roi_y_max_frac": 0.88,
 

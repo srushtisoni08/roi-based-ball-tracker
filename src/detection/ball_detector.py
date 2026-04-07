@@ -102,6 +102,15 @@ class BallDetector:
         roi_mask = np.zeros_like(combined)
         roi_mask[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2] = 255
         combined = cv2.bitwise_and(combined, roi_mask)
+        # ── Colour gate: only keep pixels matching the ball's HSV colour ──
+        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        color_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        for (lo, hi) in CFG["ball_hsv_ranges"]:
+            color_mask = cv2.bitwise_or(
+                color_mask,
+                cv2.inRange(hsv_frame, np.array(lo), np.array(hi))
+            )
+        combined = cv2.bitwise_and(combined, color_mask)
 
         # ── Contour-based candidates ──────────────────────────────
         contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL,
