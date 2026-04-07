@@ -19,9 +19,9 @@ if __name__ == "__main__":
     if args.video:
         videos = [args.video]
     else:
-        videos = glob.glob(os.path.join(args.folder, "*.mp4")) + \
-                 glob.glob(os.path.join(args.folder, "*.avi")) + \
-                 glob.glob(os.path.join(args.folder, "*.mov"))
+        videos = (glob.glob(os.path.join(args.folder, "*.mp4")) +
+                  glob.glob(os.path.join(args.folder, "*.avi")) +
+                  glob.glob(os.path.join(args.folder, "*.mov")))
 
         if not videos:
             print(f"[ERROR] No videos found in folder: {args.folder}")
@@ -31,7 +31,7 @@ if __name__ == "__main__":
 
     # ── Process each video ─────────────────────────────────────
     for video_path in videos:
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        video_name  = os.path.splitext(os.path.basename(video_path))[0]
         output_path = os.path.join(args.output, f"{video_name}_result.mp4")
 
         print(f"\n{'='*58}")
@@ -39,9 +39,9 @@ if __name__ == "__main__":
         print(f"{'='*58}")
 
         process_video(
-            video_path=video_path,
-            view=args.view,
-            output_path=output_path,
-            show=args.show,
-            debug=args.debug,
+            video_path  = video_path,
+            view        = args.view,
+            output_path = output_path,
+            show        = args.show,
+            debug       = args.debug,
         )
