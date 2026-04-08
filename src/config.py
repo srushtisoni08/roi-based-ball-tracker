@@ -1,52 +1,57 @@
 CFG = {
     # ── Background subtractor ───────────────────────────────────────
-    # Shorter history = faster warmup; lower varThreshold = more sensitive
-    "bg_history":       150,
-    "bg_var_threshold": 25,
-    # ── Ball colour filter (yellow tennis/soft ball) ─────────────────
+    "bg_history":       200,
+    "bg_var_threshold": 30,
+
+    # ── Ball colour filter ──────────────────────────────────────────
     "ball_color": "yellow",
     "ball_hsv_ranges": [
-        ([18, 100, 100], [40, 255, 255]),   # pure yellow
+        ([18, 80, 80],  [38, 255, 255]),
+        ([15, 60, 120], [42, 255, 255]),
     ],
 
     # ── Ball size (fraction of frame height) ────────────────────────
-    "ball_min_radius_frac": 0.004,
-    "ball_max_radius_frac": 0.035,   # slightly wider to catch larger apparent size
+    "ball_min_radius_frac": 0.003,
+    "ball_max_radius_frac": 0.06,
 
     # ── Area filter in pixels² ──────────────────────────────────────
-    "ball_min_area_px":  15,
-    "ball_max_area_px": 1400,
+    "ball_min_area_px":   20,
+    "ball_max_area_px": 8000,
 
     # ── Circularity thresholds ──────────────────────────────────────
-    # Lower thresholds because motion blur makes ball slightly non-circular
-    "circularity_pro":  0.40,
-    "circularity_mob":  0.52,
+    "circularity_pro":  0.45,
+    "circularity_mob":  0.35,
 
     # ── Hough fallback parameters ───────────────────────────────────
-    "hough_param1": 50,
-    "hough_param2": 13,   # lower = more circles detected (better recall)
+    "hough_param1": 40,
+    "hough_param2": 12,
 
     # ── Delivery segmentation ───────────────────────────────────────
-    "min_track_frames":    4,    # was 5 — catch shorter visible deliveries
-    "delivery_gap_frames": 70,
+    "min_track_frames":    3,
+    "delivery_gap_frames": 80,
 
     # ── Trajectory noise filter ──────────────────────────────────────
-    "max_interframe_jump_px": 60,
+    "max_interframe_jump_px": 90,
+    "spike_tolerance_px":     55,
 
-    # ── Bounce detection (side view) ────────────────────────────────
-    "bounce_reversal_px":  2,
-    "min_descent_frames":  2,
+    # ── Bounce detection ─────────────────────────────────────────────
+    # These were 2px / 2 frames — far too sensitive, any noise = false bounce
+    # A real bounce reversal is at minimum 15px at pitch level
+    "bounce_reversal_px":  15,   # was 2 — noise-level, caused false bounces
+    "min_descent_frames":   5,   # was 2 — need sustained descent, not 2-frame dip
 
-    # ── Front view bounce ────────────────────────────────────────────
-    "front_bounce_size_jump": 1.14,
-    "front_bounce_window":    6,
+    # ── Front view bounce ─────────────────────────────────────────────
+    # Signal B (radius burst): removed — ball shrinks when moving away from camera
+    # (bowler POV portrait video). Radius growth signal is wrong for this setup.
+    # Kept for landscape broadcast cameras where ball approaches camera.
+    "front_bounce_size_jump": 1.25,   # raised — only trigger on very clear growth
+    "front_bounce_window":    8,
 
     # ── ROI ──────────────────────────────────────────────────────────
-    # Wider vertical range to catch full tosses and short-pitched balls
-    "roi_x_min_frac": 0.20,
-    "roi_x_max_frac": 0.80,
-    "roi_y_min_frac": 0.18,
-    "roi_y_max_frac": 0.88,
+    "roi_x_min_frac": 0.10,
+    "roi_x_max_frac": 0.90,
+    "roi_y_min_frac": 0.15,
+    "roi_y_max_frac": 0.92,
 
     # ── Length zones (side view, x-fraction of frame width) ──────────
     "length_zones_side": {

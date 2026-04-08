@@ -7,26 +7,21 @@ from src.config import CFG
 
 class BallDetector:
     def __init__(self, frame_height, frame_width, quality):
-        # Background subtractor — moderate history, sensitive threshold
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
             history=CFG["bg_history"],
             varThreshold=CFG["bg_var_threshold"],
             detectShadows=False,
         )
 
-        # Two separate kernels:
-        # - small open: removes tiny speckle noise without killing ball blobs
-        # - larger close: fills holes in the ball silhouette caused by motion blur
         self.kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         self.kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         self.kernel3      = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
-        self.min_r = int(CFG["ball_min_radius_frac"] * frame_height)
+        self.min_r = max(3, int(CFG["ball_min_radius_frac"] * frame_height))
         self.max_r = int(CFG["ball_max_radius_frac"] * frame_height)
         self.circ_thresh = (CFG["circularity_pro"] if quality == "professional"
                             else CFG["circularity_mob"])
 
-        # ROI bounds
         self.roi_x1 = int(CFG["roi_x_min_frac"] * frame_width)
         self.roi_x2 = int(CFG["roi_x_max_frac"] * frame_width)
         self.roi_y1 = int(CFG["roi_y_min_frac"] * frame_height)
@@ -36,20 +31,37 @@ class BallDetector:
         self.frame_width  = frame_width
         self.prev_gray    = None
 
-        # Short history of confirmed detections for motion prediction
         self.history: list[TrackPoint] = []
         self.max_history = 6
 
-        # Hough params
         self.hough_dp      = 1
         self.hough_minDist = max(10, int(self.min_r * 1.5))
 
+        # Pre-build colour mask params from config
+        self.hsv_ranges = [
+            (np.array(lo, dtype=np.uint8), np.array(hi, dtype=np.uint8))
+            for lo, hi in CFG["ball_hsv_ranges"]
+        ]
+
+    # ── Colour mask ───────────────────────────────────────────────
+    def _colour_mask(self, frame) -> np.ndarray:
+        """
+        Returns a binary mask that is 255 wherever the frame pixel
+        matches any of the configured ball HSV colour ranges.
+        Applied to BOTH the contour path and the Hough fallback so
+        nothing bypasses the colour filter.
+        """
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        for lo, hi in self.hsv_ranges:
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lo, hi))
+        # Dilate slightly so motion-blurred edges still pass
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.dilate(mask, k, iterations=1)
+        return mask
+
     # ── Motion prediction ─────────────────────────────────────────
     def _predict_next(self) -> Optional[tuple]:
-        """
-        Linear extrapolation from last 2 confirmed detections.
-        Used to bias scoring toward physically plausible positions.
-        """
         if len(self.history) < 2:
             return None
         p1, p2 = self.history[-2], self.history[-1]
@@ -61,21 +73,18 @@ class BallDetector:
                 self.roi_y1 <= cy <= self.roi_y2)
 
     def _score(self, circularity, area, cx, cy, pred) -> float:
-        """
-        Multi-factor candidate score:
-          - circularity * sqrt(area): rewards round, well-sized blobs
-          - proximity bonus: rewards candidates near predicted position
-        """
         score = circularity * np.sqrt(area)
         if pred is not None:
             dist = np.hypot(cx - pred[0], cy - pred[1])
-            # Up to 2x bonus for candidates very close to prediction
             score *= (1.0 + max(0.0, 1.5 - dist / 80.0))
         return score
 
     # ── Main detection ────────────────────────────────────────────
     def detect(self, frame) -> Optional[TrackPoint]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Build colour mask ONCE — reused by both methods
+        colour = self._colour_mask(frame)
 
         # Method 1: Background subtraction
         fg = self.bg_sub.apply(frame)
@@ -86,37 +95,31 @@ class BallDetector:
         fd_mask = np.zeros_like(fg)
         if self.prev_gray is not None:
             diff = cv2.absdiff(gray, self.prev_gray)
-            # Adaptive threshold relative to local noise level
             noise_level = np.std(diff[self.roi_y1:self.roi_y2,
                                       self.roi_x1:self.roi_x2])
-            thresh_val  = max(10, int(noise_level * 1.4))
+            thresh_val  = max(8, int(noise_level * 1.3))
             _, fd_mask  = cv2.threshold(diff, thresh_val, 255, cv2.THRESH_BINARY)
             fd_mask     = cv2.morphologyEx(fd_mask, cv2.MORPH_OPEN, self.kernel3)
 
         self.prev_gray = gray
 
-        # Combine both motion masks
+        # Combine motion masks
         combined = cv2.bitwise_or(fg, fd_mask)
 
         # Apply ROI mask
         roi_mask = np.zeros_like(combined)
         roi_mask[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2] = 255
         combined = cv2.bitwise_and(combined, roi_mask)
-        # ── Colour gate: only keep pixels matching the ball's HSV colour ──
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        color_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-        for (lo, hi) in CFG["ball_hsv_ranges"]:
-            color_mask = cv2.bitwise_or(
-                color_mask,
-                cv2.inRange(hsv_frame, np.array(lo), np.array(hi))
-            )
-        combined = cv2.bitwise_and(combined, color_mask)
+
+        # ── Apply colour filter — this is the critical step ───────
+        # Only pixels that are BOTH moving AND match ball colour survive
+        combined = cv2.bitwise_and(combined, colour)
 
         # ── Contour-based candidates ──────────────────────────────
         contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
 
-        candidates: list[tuple] = []   # (score, cx, cy, radius)
+        candidates: list[tuple] = []
         pred = self._predict_next()
 
         for cnt in contours:
@@ -139,13 +142,18 @@ class BallDetector:
             score = self._score(circularity, area, cx, cy, pred)
             candidates.append((score, cx, cy, radius))
 
-        # ── Hough fallback — only when contours found nothing ─────
-        # HoughCircles is expensive; only invoke it as a fallback so
-        # accuracy is preserved without running it on every frame.
+        # ── Hough fallback — colour-gated ROI only ────────────────
+        # IMPORTANT: run Hough on the colour-masked grayscale, NOT raw gray
+        # This prevents Hough from finding circles in trees/background
         if not candidates:
-            roi_gray = gray[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
-            roi_blur = cv2.GaussianBlur(roi_gray, (5, 5), 1.5)
-            circles  = cv2.HoughCircles(
+            # Mask gray with colour filter before running Hough
+            colour_roi = colour[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
+            gray_roi   = gray[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
+            # Apply: only keep gray values where colour mask is active
+            masked_gray = cv2.bitwise_and(gray_roi, colour_roi)
+            roi_blur = cv2.GaussianBlur(masked_gray, (5, 5), 1.5)
+
+            circles = cv2.HoughCircles(
                 roi_blur,
                 cv2.HOUGH_GRADIENT,
                 dp=self.hough_dp,
@@ -162,7 +170,6 @@ class BallDetector:
                     hr = int(c[2])
                     if not self._in_roi(hx, hy):
                         continue
-                    # Estimated area from radius
                     est_area = np.pi * hr * hr
                     score = self._score(0.85, est_area, hx, hy, pred)
                     candidates.append((score, hx, hy, hr))
@@ -170,11 +177,9 @@ class BallDetector:
         if not candidates:
             return None
 
-        # Pick highest-scoring candidate
         _, cx, cy, radius = max(candidates, key=lambda t: t[0])
         tp = TrackPoint(frame=0, x=int(cx), y=int(cy), radius=float(radius))
 
-        # Update motion history
         self.history.append(tp)
         if len(self.history) > self.max_history:
             self.history.pop(0)

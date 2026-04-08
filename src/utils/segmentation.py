@@ -14,18 +14,17 @@ def _filter_noisy_detections(detections: list[TrackPoint]) -> list[TrackPoint]:
 
     Pass 1 — jump filter:
         Remove detections that jump too far from the previous accepted point,
-        scaled by frame gap. A real cricket ball cannot teleport.
+        scaled by frame gap.
 
     Pass 2 — median spike filter:
-        After pass 1, any remaining point that deviates greatly from its
-        local median neighbourhood in X or Y is a stationary false positive
-        (e.g. a stumps highlight, white line on pitch) that slipped through
-        because it happened to land near the previous ball position.
+        Remove points that deviate far from their local median neighbourhood.
+        Uses spike_tolerance_px from config (was hardcoded 30px — too tight).
     """
     if not detections:
         return []
 
-    max_jump = CFG["max_interframe_jump_px"]
+    max_jump      = CFG["max_interframe_jump_px"]
+    spike_tol     = CFG.get("spike_tolerance_px", 55)
 
     # ── Pass 1: trajectory continuity ─────────────────────────────
     filtered = [detections[0]]
@@ -33,7 +32,7 @@ def _filter_noisy_detections(detections: list[TrackPoint]) -> list[TrackPoint]:
         curr      = detections[i]
         prev      = filtered[-1]
         frame_gap = max(1, curr.frame - prev.frame)
-        allowed   = max_jump * min(frame_gap, 3)   # cap so it doesn't become infinite
+        allowed   = max_jump * min(frame_gap, 4)
 
         if _distance(curr, prev) <= allowed:
             filtered.append(curr)
@@ -45,7 +44,7 @@ def _filter_noisy_detections(detections: list[TrackPoint]) -> list[TrackPoint]:
     xs = np.array([p.x for p in filtered], dtype=float)
     ys = np.array([p.y for p in filtered], dtype=float)
 
-    window = 5
+    window = 7       # wider window = smoother, less likely to flag real ball
     half   = window // 2
     keep   = []
     for i, p in enumerate(filtered):
@@ -53,13 +52,12 @@ def _filter_noisy_detections(detections: list[TrackPoint]) -> list[TrackPoint]:
         hi    = min(len(filtered), i + half + 1)
         med_x = np.median(xs[lo:hi])
         med_y = np.median(ys[lo:hi])
-        # Spike = deviates > 30px from local median in either axis
-        if abs(p.x - med_x) > 30 or abs(p.y - med_y) > 30:
+        if abs(p.x - med_x) > spike_tol or abs(p.y - med_y) > spike_tol:
             continue
         keep.append(p)
 
     print(f"[INFO] Noise filter: {len(keep)}/{len(detections)} detections kept")
-    return keep
+    return keep if keep else filtered   # fallback: if filter kills everything, return pass-1 result
 
 
 def segment_deliveries(all_detections: list[TrackPoint]) -> list[list[TrackPoint]]:
@@ -84,7 +82,6 @@ def segment_deliveries(all_detections: list[TrackPoint]) -> list[list[TrackPoint
             current = []
         current.append(clean[i])
 
-    # Final segment
     if len(current) >= CFG["min_track_frames"]:
         deliveries.append(current)
     else:
