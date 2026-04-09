@@ -39,16 +39,10 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         view = detect_view(cap, height, width)
     print(f"[INFO] View mode: {view}\n")
 
-    writer = None
-    if output_path:
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
     detector       = BallDetector(height, width, quality)
     all_detections : list[TrackPoint] = []
-    trail          = deque(maxlen=80)   # longer trail = more path visible
 
-    # Pass 1: detect only (no annotation yet — we annotate in pass 3 with correct results)
+    # ── Pass 1: detect ────────────────────────────────────────────
     frame_no = 0
     while True:
         ret, frame = cap.read()
@@ -61,8 +55,6 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
         frame_no += 1
 
     cap.release()
-    if writer:
-        writer.release()
 
     # ── Pass 2: segment & analyse ─────────────────────────────────
     deliveries = segment_deliveries(all_detections)
@@ -102,15 +94,13 @@ def process_video(video_path, view="auto", output_path=None, show=False, debug=F
             track          = delivery,
         )
         results.append(res)
-
         b_str = "BOUNCED  ↓" if bounced else "FULL TOSS →"
         print(f"  Ball {i:>2}:  {b_str:<14}  ({len(delivery)} pts, {dur:.2f}s)")
 
     print("=" * 58)
     bounced_count   = sum(1 for r in results if r.bounced)
     no_bounce_count = sum(1 for r in results if not r.bounced)
-    print(f"  Pitched deliveries : {bounced_count}")
-    print(f"  Full tosses        : {no_bounce_count}")
+    print(f"  Pitched : {bounced_count}   Full tosses : {no_bounce_count}")
     print("=" * 58)
 
     # ── Pass 3: render annotated video ────────────────────────────
@@ -164,41 +154,53 @@ def _render_annotated_video(video_path, output_path, results, view,
     tmp_path = output_path + ".tmp.mp4"
     writer   = cv2.VideoWriter(tmp_path, fourcc, fps, (width, height))
 
-    # Build bounce active-window: frame → [(ball_no, bounce_pt)]
+    # Bounce active window
     active_bounces: dict[int, list] = {}
     for res in results:
         if res.bounce_point is not None and res.bounce_frame is not None:
             for f in range(res.bounce_frame, res.end_frame + 90 + 1):
                 active_bounces.setdefault(f, []).append((res.ball_no, res.bounce_point))
 
-    # Badge show window: ball_no → last frame to show badge
     badge_until: dict[int, int] = {
         r.ball_no: r.end_frame + BADGE_DURATION_FRAMES for r in results
     }
 
-    # All track points sorted by frame for trail replay
+    # All track points sorted for trail replay
     all_track_pts: list[tuple] = []
     for res in results:
         for pt in res.track:
             all_track_pts.append((pt.frame, pt.x, pt.y, res.ball_no))
     all_track_pts.sort(key=lambda t: t[0])
 
-    # Per-delivery full path (draw entire path once delivery ends)
+    # Per-delivery full paths for ghost trail (only deliveries with bounce_point)
     delivery_paths: dict[int, list] = {
         res.ball_no: [(pt.x, pt.y) for pt in res.track]
         for res in results
+        if res.bounce_point is not None   # only confirmed deliveries get ghost trail
     }
 
-    trail     = deque(maxlen=80)
+    trail     = deque(maxlen=60)
     trail_ptr = 0
     frame_no  = 0
+    last_ball_no = -1   # track when delivery changes to reset trail
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Advance trail
+        # Find current delivery
+        current_res = next(
+            (r for r in results if r.start_frame <= frame_no <= r.end_frame), None
+        )
+        current_ball_no = current_res.ball_no if current_res else -1
+
+        # Reset trail when a new delivery starts
+        if current_ball_no != last_ball_no:
+            trail.clear()
+            last_ball_no = current_ball_no
+
+        # Advance trail pointer
         while trail_ptr < len(all_track_pts) and all_track_pts[trail_ptr][0] <= frame_no:
             _, tx, ty, _ = all_track_pts[trail_ptr]
             trail.append((tx, ty))
@@ -206,38 +208,37 @@ def _render_annotated_video(video_path, output_path, results, view,
 
         vis = frame.copy()
 
-        # Draw completed delivery full paths (persistent ghost trail)
-        for res in results:
-            if res.end_frame < frame_no and res.bounce_point is not None:
+        # Ghost trails from completed deliveries (confirmed only)
+        completed_now = [r for r in results if r.end_frame < frame_no]
+        for res in completed_now:
+            if res.ball_no in delivery_paths:
                 pts = delivery_paths[res.ball_no]
                 for i in range(1, len(pts)):
-                    alpha = i / len(pts)
-                    c = (int(40 * alpha), int(80 * alpha), int(120 * alpha))
-                    cv2.line(vis, pts[i-1], pts[i], c, 1, cv2.LINE_AA)
+                    a = i / len(pts)
+                    cv2.line(vis, pts[i-1], pts[i],
+                             (int(30*a), int(60*a), int(90*a)), 1, cv2.LINE_AA)
 
-        # Live trail for current ball in flight
+        # Live glowing trail
         draw_ball_trail(vis, trail)
 
-        # Ball circle at current detected position
+        # Ball circle at exact detected position
         matched = next((t for t in all_track_pts if t[0] == frame_no), None)
         if matched:
             _, tx, ty, _ = matched
             cv2.circle(vis, (tx, ty), 10, CFG["color_ball"], 2, cv2.LINE_AA)
-            # Inner dot
             cv2.circle(vis, (tx, ty),  4, (255, 255, 255), -1, cv2.LINE_AA)
 
         # Bounce marker
         for ball_no, pt in active_bounces.get(frame_no, []):
             draw_bounce_marker(vis, pt)
 
-        # Bounced / Full Toss badge (top-right, no length labels)
-        completed_now = [r for r in results if r.end_frame < frame_no]
+        # BOUNCED / FULL TOSS badge
         for res in completed_now:
             draw_result_badge(vis, res, frame_no, badge_until)
 
         if debug:
             cv2.putText(vis, f"frame:{frame_no}  view:{view}",
-                        (10, height - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
+                        (10, height-8), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
                         (160, 160, 160), 1, cv2.LINE_AA)
 
         writer.write(vis)

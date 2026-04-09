@@ -6,46 +6,65 @@ from src.config import CFG
 
 def analyse_side(track: list[TrackPoint], fps: float, frame_width: int) -> tuple:
     """
-    Side-view bounce and length analysis.
+    Side-view bounce detection using peak-based method.
 
-    Bounce detection:
-    ─────────────────
-    Ball descends (Y increases in image coords) then reverses after pitch contact.
-    Requires sustained descent (min_descent_frames) before reversal, and the
-    reversal must be at least bounce_reversal_px — now 15px instead of 2px so
-    detection noise (3-5px jitter) cannot trigger a false bounce.
+    In side view the ball descends (Y increases) then bounces upward (Y decreases).
+    Peak-based detection: find the highest Y, check there is real descent before
+    and real ascent after. More robust than state-machine for short tracks.
+
+    Parameters from config:
+      bounce_reversal_px  = 12  (min descent/ascent magnitude)
+      min_descent_frames  = 3   (min frames of descent before peak)
     """
-    if len(track) < 3:
+    if len(track) < 4:
         return False, None, "Unknown"
 
     ys = [p.y for p in track]
     xs = [p.x for p in track]
 
-    smoothed_y = _smooth(ys, window=7)
+    smoothed_y = _smooth(ys, window=5)
 
-    min_desc = CFG["min_descent_frames"]   # 5
-    rev_px   = CFG["bounce_reversal_px"]   # 15
+    min_desc = CFG["min_descent_frames"]   # 3
+    rev_px   = CFG["bounce_reversal_px"]   # 12
 
-    bounced     = False
-    bounce_i    = None
-    desc_count  = 0
-    local_max_y = smoothed_y[0]
+    bounced  = False
+    bounce_i = None
 
-    for i in range(1, len(smoothed_y)):
-        dy = smoothed_y[i] - smoothed_y[i - 1]
+    # ── Primary: peak-based ───────────────────────────────────────
+    # Find the Y maximum — this is where the ball contacts the pitch.
+    # Require: enough frames of descent before it AND real ascent after it.
+    peak_i = int(np.argmax(smoothed_y))
 
-        if dy > 1.0:
-            desc_count  += 1
-            local_max_y  = max(local_max_y, smoothed_y[i])
-        elif dy < -1.0:
-            reversal_mag = local_max_y - smoothed_y[i]
-            if desc_count >= min_desc and reversal_mag >= rev_px:
-                bounced  = True
-                bounce_i = i
-                break
-            desc_count  = 0
-            local_max_y = smoothed_y[i]
-        # flat: keep counting descent
+    if 0 < peak_i < len(smoothed_y) - 1:
+        descent = smoothed_y[peak_i] - smoothed_y[0]
+        ascent  = smoothed_y[peak_i] - min(smoothed_y[peak_i:])
+
+        frames_before_peak = peak_i  # number of frames before peak
+
+        if (frames_before_peak >= min_desc and
+                descent >= rev_px and
+                ascent  >= rev_px):
+            bounced  = True
+            bounce_i = peak_i
+
+    # ── Fallback: state-machine ───────────────────────────────────
+    if not bounced:
+        desc_count  = 0
+        local_max_y = smoothed_y[0]
+
+        for i in range(1, len(smoothed_y)):
+            dy = smoothed_y[i] - smoothed_y[i - 1]
+            if dy > 1.0:
+                desc_count  += 1
+                local_max_y  = max(local_max_y, smoothed_y[i])
+            elif dy < -2.0:
+                rev = local_max_y - smoothed_y[i]
+                if desc_count >= min_desc and rev >= rev_px:
+                    bounced  = True
+                    bounce_i = i
+                    break
+                desc_count  = 0
+                local_max_y = smoothed_y[i]
 
     bounce_pt = (track[bounce_i].x, track[bounce_i].y) if bounce_i is not None else None
 
