@@ -4,6 +4,70 @@ from typing import Optional
 from src.models.track_point import TrackPoint
 from src.config import CFG
 
+
+class KalmanBallFilter:
+    """
+    Constant-velocity Kalman filter for 2-D ball tracking.
+    State: [x, y, vx, vy]   Observation: [x, y]
+    """
+    def __init__(self):
+        self.kf = cv2.KalmanFilter(4, 2)
+
+        self.kf.transitionMatrix = np.array([
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=np.float32)
+
+        self.kf.measurementMatrix = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+        ], dtype=np.float32)
+
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+        self.kf.processNoiseCov[2, 2] = 0.1
+        self.kf.processNoiseCov[3, 3] = 0.1
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1.5
+        self.kf.errorCovPost = np.eye(4, dtype=np.float32) * 10.0
+
+        self.initialized = False
+        self.missed_frames = 0
+        self.MAX_MISSED = 8
+
+    def init(self, x: float, y: float):
+        state = np.array([[x], [y], [0.0], [0.0]], dtype=np.float32)
+        self.kf.statePre  = state.copy()
+        self.kf.statePost = state.copy()
+        self.initialized  = True
+        self.missed_frames = 0
+
+    def predict(self) -> Optional[tuple]:
+        if not self.initialized:
+            return None
+        pred = self.kf.predict()
+        return float(pred[0][0]), float(pred[1][0])
+
+    def correct(self, x: float, y: float) -> tuple:
+        meas = np.array([[x], [y]], dtype=np.float32)
+        corrected = self.kf.correct(meas)
+        self.missed_frames = 0
+        return float(corrected[0][0]), float(corrected[1][0])
+
+    def coast(self) -> Optional[tuple]:
+        if not self.initialized:
+            return None
+        self.missed_frames += 1
+        if self.missed_frames > self.MAX_MISSED:
+            return None
+        pred = self.kf.predict()
+        return float(pred[0][0]), float(pred[1][0])
+
+    def reset(self):
+        self.initialized = False
+        self.missed_frames = 0
+
+
 class BallDetector:
     def __init__(self, frame_height, frame_width, quality):
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
@@ -30,9 +94,8 @@ class BallDetector:
         self.frame_width  = frame_width
         self.prev_gray    = None
 
-        # Longer history = better velocity prediction
         self.history: list[TrackPoint] = []
-        self.max_history = 10
+        self.max_history = 12
 
         self.hough_dp      = 1
         self.hough_minDist = max(10, int(self.min_r * 1.5))
@@ -42,7 +105,13 @@ class BallDetector:
             for lo, hi in CFG["ball_hsv_ranges"]
         ]
 
-    # ── Colour mask ───────────────────────────────────────────────
+        self.kalman = KalmanBallFilter()
+
+    def reset_for_new_delivery(self):
+        """Call between deliveries to reset Kalman state."""
+        self.kalman.reset()
+        self.history.clear()
+
     def _colour_mask(self, frame) -> np.ndarray:
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -52,29 +121,20 @@ class BallDetector:
         mask = cv2.dilate(mask, k, iterations=1)
         return mask
 
-    # ── Velocity-weighted prediction ─────────────────────────────
     def _predict_next(self) -> Optional[tuple]:
-        """
-        Weighted average of recent velocity vectors.
-        More recent frames get higher weight — gives better prediction
-        for curved ball trajectories than simple linear extrapolation.
-        """
+        if self.kalman.initialized:
+            return self.kalman.predict()
         if len(self.history) < 2:
             return None
-
-        # Use up to last 4 points for velocity estimate
         pts = self.history[-4:]
         if len(pts) < 2:
             return None
-
-        # Weighted velocities — most recent gets weight 4, oldest gets 1
         vx_sum, vy_sum, w_sum = 0.0, 0.0, 0.0
         for i in range(1, len(pts)):
-            w = float(i)  # more recent = higher weight
+            w = float(i)
             vx_sum += w * (pts[i].x - pts[i-1].x)
             vy_sum += w * (pts[i].y - pts[i-1].y)
             w_sum  += w
-
         vx = vx_sum / w_sum
         vy = vy_sum / w_sum
         last = self.history[-1]
@@ -85,36 +145,27 @@ class BallDetector:
                 self.roi_y1 <= cy <= self.roi_y2)
 
     def _score(self, circularity, area, cx, cy, pred) -> float:
-        """
-        Score = circularity × √area × trajectory_bonus
-        Trajectory bonus: up to 3× for candidates near predicted position.
-        Candidates far from prediction get penalised (0.2× if >200px away).
-        """
         score = circularity * np.sqrt(area)
         if pred is not None:
             dist = np.hypot(cx - pred[0], cy - pred[1])
-            if dist < 30:
-                # Very close to prediction — strong bonus
-                score *= 3.0
-            elif dist < 80:
-                score *= (1.0 + max(0.0, 2.0 - dist / 40.0))
-            elif dist > 200:
-                # Far from prediction — likely a false positive
-                score *= 0.2
+            if dist < 20:
+                score *= 4.0
+            elif dist < 50:
+                score *= 2.5
+            elif dist < 100:
+                score *= (1.0 + max(0.0, 2.0 - dist / 50.0))
+            elif dist > 180:
+                score *= 0.15
         return score
 
-    # ── Main detection ────────────────────────────────────────────
     def detect(self, frame) -> Optional[TrackPoint]:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
         colour = self._colour_mask(frame)
 
-        # Method 1: Background subtraction
         fg = self.bg_sub.apply(frame)
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,  self.kernel_open)
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, self.kernel_close)
 
-        # Method 2: Frame differencing
         fd_mask = np.zeros_like(fg)
         if self.prev_gray is not None:
             diff = cv2.absdiff(gray, self.prev_gray)
@@ -127,15 +178,11 @@ class BallDetector:
         self.prev_gray = gray
 
         combined = cv2.bitwise_or(fg, fd_mask)
-
         roi_mask = np.zeros_like(combined)
         roi_mask[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2] = 255
         combined = cv2.bitwise_and(combined, roi_mask)
-
-        # Colour gate — must match ball colour AND be moving
         combined = cv2.bitwise_and(combined, colour)
 
-        # ── Contour candidates ────────────────────────────────────
         contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
         candidates: list[tuple] = []
@@ -160,22 +207,17 @@ class BallDetector:
             score = self._score(circularity, area, cx, cy, pred)
             candidates.append((score, cx, cy, radius))
 
-        # ── Hough fallback — colour-gated ─────────────────────────
+        # Hough fallback
         if not candidates:
             colour_roi  = colour[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
             gray_roi    = gray[self.roi_y1:self.roi_y2, self.roi_x1:self.roi_x2]
             masked_gray = cv2.bitwise_and(gray_roi, colour_roi)
             roi_blur    = cv2.GaussianBlur(masked_gray, (5, 5), 1.5)
-
             circles = cv2.HoughCircles(
-                roi_blur,
-                cv2.HOUGH_GRADIENT,
-                dp=self.hough_dp,
-                minDist=self.hough_minDist,
-                param1=CFG["hough_param1"],
-                param2=CFG["hough_param2"],
-                minRadius=self.min_r,
-                maxRadius=self.max_r,
+                roi_blur, cv2.HOUGH_GRADIENT,
+                dp=self.hough_dp, minDist=self.hough_minDist,
+                param1=CFG["hough_param1"], param2=CFG["hough_param2"],
+                minRadius=self.min_r, maxRadius=self.max_r,
             )
             if circles is not None:
                 for c in np.uint16(np.around(circles[0])):
@@ -188,11 +230,33 @@ class BallDetector:
                     score = self._score(0.85, est_area, hx, hy, pred)
                     candidates.append((score, hx, hy, hr))
 
+        # Kalman coast when still no detection
         if not candidates:
+            coasted = self.kalman.coast()
+            if coasted is not None:
+                cx, cy = coasted
+                r = self.history[-1].radius if self.history else float(self.min_r)
+                tp = TrackPoint(frame=0, x=int(cx), y=int(cy), radius=r)
+                tp._coasted = True
+                self.history.append(tp)
+                if len(self.history) > self.max_history:
+                    self.history.pop(0)
+                return tp
             return None
 
         _, cx, cy, radius = max(candidates, key=lambda t: t[0])
-        tp = TrackPoint(frame=0, x=int(cx), y=int(cy), radius=float(radius))
+
+        # Update Kalman with real detection
+        if not self.kalman.initialized:
+            self.kalman.init(cx, cy)
+        cx_k, cy_k = self.kalman.correct(cx, cy)
+
+        # Blend: 70% Kalman-smoothed, 30% raw
+        cx_f = 0.7 * cx_k + 0.3 * cx
+        cy_f = 0.7 * cy_k + 0.3 * cy
+
+        tp = TrackPoint(frame=0, x=int(cx_f), y=int(cy_f), radius=float(radius))
+        tp._coasted = False
 
         self.history.append(tp)
         if len(self.history) > self.max_history:

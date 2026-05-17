@@ -4,56 +4,62 @@ CFG = {
     "bg_var_threshold": 22,
 
     # ── Ball colour filter ──────────────────────────────────────────
-    # Pixel-confirmed ball HSV: H=27-30, S=120-210, V=140-251 (clear frames)
-    # Motion-blurred frames shift to: H=14-45, S=80-110, V=80-130
-    # Two ranges: tight for clear frames, wider for blurred/fast frames
+    # Three HSV ranges covering:
+    #   1) Yellow/lime ball (clear frames) — wide for all motion states
+    #   2) Orange-yellow for shade / indoor / underexposed lighting
+    #   3) White/light ball and overexposed highlights
     "ball_color": "yellow",
     "ball_hsv_ranges": [
-        ([22, 80, 80],  [45, 255, 255]),   # wider — catches ball in all motion states
+        ([18, 60,  70],  [45, 255, 255]),   # yellow — main range
+        ([10, 40,  60],  [22, 220, 200]),   # orange-yellow — shade/indoor
+        ([0,  0,  200],  [180, 40, 255]),   # white/overexposed highlight
     ],
 
     # ── Ball size ────────────────────────────────────────────────────
-    "ball_min_radius_frac": 0.004,   # lowered — catches ball when small/far
+    "ball_min_radius_frac": 0.004,
     "ball_max_radius_frac": 0.065,
 
     # ── Area filter ──────────────────────────────────────────────────
-    "ball_min_area_px":   30,    # lowered — ball can be small when far away
+    "ball_min_area_px":   25,
     "ball_max_area_px": 8000,
 
     # ── Circularity ──────────────────────────────────────────────────
-    "circularity_pro":  0.40,
-    "circularity_mob":  0.35,    # motion blur makes ball elliptical
+    "circularity_pro":  0.38,    # slightly relaxed — real ball at speed is elliptical
+    "circularity_mob":  0.30,
 
     # ── Hough fallback ───────────────────────────────────────────────
-    "hough_param1": 40,
-    "hough_param2": 12,
+    "hough_param1": 38,
+    "hough_param2": 10,          # lower = more sensitive in fallback
 
     # ── Delivery segmentation ────────────────────────────────────────
-    "min_track_frames":    3,
-    "delivery_gap_frames": 80,
+    "min_track_frames":    12,
+    "delivery_gap_frames": 200,
 
     # ── Trajectory noise filter ──────────────────────────────────────
-    "max_interframe_jump_px": 90,
-    "spike_tolerance_px":     55,
+    "max_interframe_jump_px": 80,
+    "spike_tolerance_px":     40,
 
     # ── Stationarity filter ──────────────────────────────────────────
-    "stationary_frame_threshold": 6,
-    "stationary_pixel_radius":    10,
+    "stationary_frame_threshold": 4,
+    "stationary_pixel_radius":    12,
 
     # ── Bounce detection ─────────────────────────────────────────────
-    # At 30fps a real ball bounce takes 3-4 frames of descent, not 5
-    "bounce_reversal_px":  12,   # was 15 — ball only dips 24px, 15 was too close to margin
-    "min_descent_frames":   3,   # was 5 — at 30fps bounce happens in 3-4 frames
+    "bounce_reversal_px":  25,
+    "min_descent_frames":   6,
 
     # ── Front view bounce ────────────────────────────────────────────
     "front_bounce_size_jump": 1.25,
     "front_bounce_window":    8,
 
     # ── ROI ──────────────────────────────────────────────────────────
-    "roi_x_min_frac": 0.10,
-    "roi_x_max_frac": 0.90,
-    "roi_y_min_frac": 0.15,
-    "roi_y_max_frac": 0.92,
+    "roi_x_min_frac": 0.08,     # slightly wider — don't clip edge deliveries
+    "roi_x_max_frac": 0.92,
+    "roi_y_min_frac": 0.12,
+    "roi_y_max_frac": 0.94,
+
+    # ── Trail interpolation ──────────────────────────────────────────
+    # Fill gaps in detected track up to this many frames with interpolated pts
+    "trail_max_interp_gap": 15,
 
     # ── Length zones (side view) ──────────────────────────────────────
     "length_zones_side": {
